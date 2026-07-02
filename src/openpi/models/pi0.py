@@ -98,6 +98,7 @@ class Pi0(_model.BaseModel):
             self.action_time_mlp_in = nnx.Linear(2 * action_expert_config.width, action_expert_config.width, rngs=rngs)
             self.action_time_mlp_out = nnx.Linear(action_expert_config.width, action_expert_config.width, rngs=rngs)
         self.action_out_proj = nnx.Linear(action_expert_config.width, config.action_dim, rngs=rngs)
+        self.action_dim_actual = config.action_dim_actual
 
         # This attribute gets automatically set by model.train() and model.eval().
         self.deterministic = True
@@ -211,7 +212,10 @@ class Pi0(_model.BaseModel):
         )
         v_t = self.action_out_proj(suffix_out[:, -self.action_horizon :])
 
-        return jnp.mean(jnp.square(v_t - u_t), axis=-1)
+        loss = jnp.square(v_t - u_t)
+        if self.action_dim_actual is not None:
+            loss = loss[..., : self.action_dim_actual]
+        return jnp.mean(loss, axis=-1)
 
     @override
     def sample_actions(

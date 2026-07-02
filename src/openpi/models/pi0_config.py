@@ -31,6 +31,8 @@ class Pi0Config(_model.BaseModelConfig):
     pi05: bool = False
     # This config option is not used directly by the model, but it is read by the ModelTransformFactory.
     discrete_state_input: bool = None  # type: ignore
+    # If set, compute flow-matching loss only on the first N action dims (rest are padding).
+    action_dim_actual: int | None = None
 
     pytorch_compile_mode: str | None = "max-autotune"
 
