@@ -104,6 +104,12 @@ org/dataset string and point HF_LEROBOT_HOME one level higher
 AssetsConfig(asset_id="libero_object_summed_subsampling") to avoid the nested
 path in the assets directory.
 
+Norm stats are written to:
+    assets/pi05_libero/pi05_libero_object_lora/libero_object_summed_subsampling/norm_stats.json
+
+The pi05_libero/ grouping layer lets future experiments (e.g. pi05_libero_spatial_*)
+live alongside this one under the same project umbrella without colliding.
+
 6. Training-step budget
 ------------------------
 We have ~12,500 datapoints and use batch_size=32, giving ≈391 steps per epoch.
@@ -178,7 +184,9 @@ def get_libero_object_configs():
             # → only the latest ~4.8 GB checkpoint survives on disk at any time.
             keep_period=None,
             # Relative to third_party/openpi/ (where train.py is run from).
-            assets_base_dir="../../assets",
-            checkpoint_base_dir="../../checkpoints",
+            # pi05_libero/ groups all LIBERO experiments; config name provides
+            # the next level (pi05_libero_object_lora/), then asset_id below that.
+            assets_base_dir="../../assets/pi05_libero",
+            checkpoint_base_dir="../../checkpoints/pi05_libero",
         ),
     ]
