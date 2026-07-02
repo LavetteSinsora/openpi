@@ -180,9 +180,15 @@ def get_libero_object_configs():
             # Eval every 5k steps; stop early if success rate plateaus.
             num_train_steps=30_000,
             save_interval=5_000,
-            # keep_period=None + max_to_keep=1 (hardcoded in checkpoints.py)
-            # → only the latest ~4.8 GB checkpoint survives on disk at any time.
-            keep_period=None,
+            # max_to_keep=1 is hardcoded in checkpoints.py, but keep_period
+            # overrides it: orbax permanently preserves any checkpoint whose
+            # step % keep_period == 0. With keep_period=5000 a single 30k run
+            # keeps checkpoints at 5000/10000/15000/20000/25000 (plus the final
+            # step, 29999, kept as the latest by max_to_keep=1). This lets us
+            # evaluate every periodic checkpoint after one continuous training
+            # run — no restart-and-resume blocks needed. ~6 × 4.8 GB on local
+            # Colab disk, which is well within the A100 runtime's storage.
+            keep_period=5_000,
             # Relative to third_party/openpi/ (where train.py is run from).
             # pi05_libero/ groups all LIBERO experiments; config name provides
             # the next level (pi05_libero_object_lora/), then asset_id below that.
