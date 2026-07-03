@@ -189,10 +189,11 @@ def get_libero_object_configs():
             # run — no restart-and-resume blocks needed. ~6 × 4.8 GB on local
             # Colab disk, which is well within the A100 runtime's storage.
             keep_period=5_000,
-            # Relative to third_party/openpi/ (where train.py is run from).
-            # pi05_libero/ groups all LIBERO experiments; config name provides
-            # the next level (pi05_libero_object_lora/), then asset_id below that.
-            assets_base_dir="../../assets/pi05_libero",
-            checkpoint_base_dir="../../checkpoints/pi05_libero",
+            # Relative to the openpi repo root (the cwd when running
+            # scripts/train.py / scripts/benchmark.py). pi05_libero/ groups all
+            # LIBERO experiments; config name provides the next level
+            # (pi05_libero_object_lora/), then asset_id below that.
+            assets_base_dir="./assets/pi05_libero",
+            checkpoint_base_dir="./checkpoints/pi05_libero",
         ),
     ]

@@ -1,5 +1,7 @@
-# Data directories.
-assets/
+# Data directories. Norm stats for the LIBERO replication are committed
+# (tiny, and required by the pi05_libero_object_lora config at eval time).
+/assets/*
+!/assets/pi05_libero/
 checkpoints/
 data/
 wandb/
