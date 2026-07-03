@@ -29,6 +29,7 @@ import math
 import pathlib
 import subprocess
 import sys
+import typing
 
 import imageio
 import numpy as np
@@ -70,6 +71,18 @@ class Args:
     # this repo's assets. Needed for official PI checkpoints (e.g. pi05_libero),
     # which were trained with their own normalization.
     use_checkpoint_norm_stats: bool = False
+    # Where the instruction fed to the policy comes from:
+    #   "env"      — the BDDL (:language ...) annotation via env.language_instruction,
+    #                the SAME source the training dataset was built from
+    #                ("pick the ketchup and place it in the basket").
+    #   "filename" — LIBERO's task.language, reconstructed from the .bddl filename
+    #                ("pick UP the ketchup..."), i.e. a phrasing never seen in
+    #                training. Useful as a paraphrase-robustness probe.
+    prompt_source: typing.Literal["env", "filename"] = "env"
+    # Comma-separated task ids to evaluate (e.g. "0,1,2,3,4"); None = all tasks.
+    # Lets several benchmark processes run disjoint task shards in parallel —
+    # give each its own --exp-dir and a reduced XLA_PYTHON_CLIENT_MEM_FRACTION.
+    task_ids: str | None = None
 
 
 def _quat2axisangle(quat: np.ndarray) -> np.ndarray:
@@ -172,25 +185,36 @@ def run(args: Args) -> None:
                 "config_name": args.config_name,
                 "checkpoint_dir": args.checkpoint_dir,
                 "num_trials_per_task": args.num_trials_per_task,
+                "prompt_source": args.prompt_source,
             },
         )
 
     # ── task suite ───────────────────────────────────────────────────────────
     suite = libero_benchmark.get_benchmark_dict()[TASK_SUITE]()
-    num_tasks = suite.n_tasks
-    logging.info(f"Evaluating {num_tasks} tasks × {args.num_trials_per_task} trials")
+    if args.task_ids is not None:
+        selected_tasks = [int(x) for x in args.task_ids.split(",")]
+    else:
+        selected_tasks = list(range(suite.n_tasks))
+    logging.info(f"Evaluating tasks {selected_tasks} × {args.num_trials_per_task} trials")
 
     all_results = {}
     total_ep, total_succ = 0, 0
     video_log: dict = {}  # accumulated for a single wandb.log call at the end
 
-    for task_id in range(num_tasks):
+    for task_id in selected_tasks:
         task = suite.get_task(task_id)
+        # task_key stays filename-based regardless of prompt_source so wandb
+        # metric keys and video paths are stable across eval variants.
         task_name = task.language.replace(" ", "_")
         task_key = f"task_{task_id:02d}_{task_name}"
         initial_states = suite.get_task_init_states(task_id)
 
         env = _get_env(task, args.seed)
+        if args.prompt_source == "env":
+            prompt = getattr(env, "language_instruction", None) or task.language
+        else:
+            prompt = task.language
+        logging.info(f"  prompt ({args.prompt_source}): {prompt}")
 
         video_dir = exp_dir / "videos" / task_key
         (video_dir / "success").mkdir(parents=True, exist_ok=True)
@@ -212,8 +236,13 @@ def run(args: Args) -> None:
                     obs, _, done, _ = env.step(DUMMY_ACTION)
                     continue
 
-                img = np.ascontiguousarray(obs["agentview_image"][::-1, ::-1])
-                wrist = np.ascontiguousarray(obs["robot0_eye_in_hand_image"][::-1, ::-1])
+                # [::-1] (vertical flip only) matches convert_hdf5_to_lerobot.py:
+                # robosuite offscreen frames arrive bottom-up (OpenGL row order).
+                # openpi's LIBERO example uses [::-1, ::-1] because PI's RLDS
+                # dataset is 180°-rotated — OURS IS NOT; that extra horizontal
+                # flip fed the model a mirrored world at eval.
+                img = np.ascontiguousarray(obs["agentview_image"][::-1])
+                wrist = np.ascontiguousarray(obs["robot0_eye_in_hand_image"][::-1])
                 img_r = image_tools.convert_to_uint8(image_tools.resize_with_pad(img, RESIZE, RESIZE))
                 wrist_r = image_tools.convert_to_uint8(image_tools.resize_with_pad(wrist, RESIZE, RESIZE))
                 frames.append(img_r)
@@ -227,7 +256,7 @@ def run(args: Args) -> None:
                             _quat2axisangle(obs["robot0_eef_quat"]),
                             obs["robot0_gripper_qpos"],
                         ]),
-                        "prompt": task.language,
+                        "prompt": prompt,
                     }
                     chunk = policy.infer(element)["actions"]
                     action_plan.extend(chunk[:REPLAN_STEPS])
@@ -270,7 +299,7 @@ def run(args: Args) -> None:
         }
         total_ep += args.num_trials_per_task
         total_succ += task_succ
-        logging.info(f"[{task_id+1}/{num_tasks}] {task_key}: {success_rate:.1%}")
+        logging.info(f"[task {task_id}, {len(all_results)}/{len(selected_tasks)}] {task_key}: {success_rate:.1%}")
         if wandb_run is not None:
             # incremental progress so the run is inspectable long before it ends
             wandb.log({
@@ -283,6 +312,7 @@ def run(args: Args) -> None:
     aggregate_rate = total_succ / total_ep
     results = {
         "aggregate_success_rate": aggregate_rate,
+        "prompt_source": args.prompt_source,
         "per_task": all_results,
     }
     (exp_dir / "results.json").write_text(json.dumps(results, indent=2))

@@ -50,11 +50,20 @@ check "compiled crcmod (composite-object downloads)" bash -c \
 check "wandb API key valid" bash -c \
     '[ -n "${WANDB_API_KEY:-}" ] && "$REPO_DIR/.venv/bin/wandb" login --verify'
 
-# 15GB = room for one more checkpoint save (old + new + orbax tmp ≈ 10GB
-# transient) plus artifact staging. Sized so a resume-after-crash with
-# checkpoints already on disk still passes on a 60GB volume.
-check "disk: >=15GB free on $WORKSPACE" bash -c \
-    'avail_kb=$(df -k --output=avail "$WORKSPACE" | tail -1); [ "$avail_kb" -ge 15728640 ] || { echo "only $((avail_kb / 1048576))GB free"; exit 1; }'
+# Need ~20GB headroom: a segment transition holds old + new + orbax tmp
+# checkpoints (~27GB total, 9GB each) minus the 9GB already-counted old one.
+# RunPod NETWORK volumes report the whole storage cluster to df (petabytes)
+# while the per-volume quota is invisible until EDQUOT — so when
+# VOLUME_SIZE_GB is set (the size you picked at volume creation), headroom is
+# computed as quota minus used instead of trusting df.
+check "disk: >=20GB headroom on $WORKSPACE (set VOLUME_SIZE_GB for network volumes)" bash -c '
+    if [ -n "${VOLUME_SIZE_GB:-}" ]; then
+        used_kb=$(du -sk "$WORKSPACE" 2>/dev/null | cut -f1)
+        avail_kb=$((VOLUME_SIZE_GB * 1048576 - used_kb))
+    else
+        avail_kb=$(df -k --output=avail "$WORKSPACE" | tail -1)
+    fi
+    [ "$avail_kb" -ge 20971520 ] || { echo "only $((avail_kb / 1048576))GB headroom"; exit 1; }'
 
 if [ "${AUTO_TERMINATE:-1}" = "1" ]; then
     check "runpodctl present (auto-terminate; else AUTO_TERMINATE=0)" command -v runpodctl
