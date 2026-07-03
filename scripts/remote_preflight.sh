@@ -59,8 +59,11 @@ check "disk: >=15GB free on $WORKSPACE" bash -c \
 if [ "${AUTO_TERMINATE:-1}" = "1" ]; then
     check "runpodctl present (auto-terminate; else AUTO_TERMINATE=0)" command -v runpodctl
     check "RUNPOD_POD_ID set" bash -c '[ -n "${RUNPOD_POD_ID:-}" ]'
-    check "RUNPOD_API_KEY set (runpod.io Settings -> API Keys)" bash -c \
-        '[ -n "${RUNPOD_API_KEY:-}" ] || [ -f ~/.runpod/config.toml ]'
+    # End-to-end: configure the CLI (it needs its config file pre-created) and
+    # make an authenticated API call, so a broken self-stop surfaces here — not
+    # after a 30-hour run fails.
+    check "runpodctl authenticated API access" bash -c \
+        '[ -n "${RUNPOD_API_KEY:-}" ] && mkdir -p ~/.runpod && touch ~/.runpod/.runpod.yaml && runpodctl config --apiKey "$RUNPOD_API_KEY" >/dev/null && runpodctl get pod "$RUNPOD_POD_ID" >/dev/null'
 fi
 
 if [ "$FAIL" -ne 0 ]; then

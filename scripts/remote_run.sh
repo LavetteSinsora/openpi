@@ -76,6 +76,8 @@ terminate_pod() {  # success path: everything permanent is on wandb
         echo "cannot self-terminate: RUNPOD_POD_ID/runpodctl missing — TERMINATE THE POD MANUALLY"
         return 0
     fi
+    # runpodctl errors out if its config file doesn't exist yet
+    mkdir -p "$HOME/.runpod" && touch "$HOME/.runpod/.runpod.yaml"
     [ -n "${RUNPOD_API_KEY:-}" ] && runpodctl config --apiKey "$RUNPOD_API_KEY" > /dev/null
     echo "terminating pod $RUNPOD_POD_ID in 60s (Ctrl-C to abort)"
     sleep 60
@@ -92,6 +94,8 @@ stop_pod() {  # failure path: STOP, don't terminate — /workspace (checkpoints,
         echo "cannot self-stop: RUNPOD_POD_ID/runpodctl missing — STOP THE POD MANUALLY"
         return 0
     fi
+    # runpodctl errors out if its config file doesn't exist yet
+    mkdir -p "$HOME/.runpod" && touch "$HOME/.runpod/.runpod.yaml"
     [ -n "${RUNPOD_API_KEY:-}" ] && runpodctl config --apiKey "$RUNPOD_API_KEY" > /dev/null
     echo "stopping pod $RUNPOD_POD_ID in 60s (Ctrl-C to abort)"
     sleep 60
