@@ -1,32 +1,52 @@
 #!/usr/bin/env bash
-# Full unattended π0.5 → LIBERO-OBJECT experiment:
+# Full unattended π0.5 → LIBERO-OBJECT experiment, with training and evaluation
+# INTERLEAVED in 5k-step segments:
 #
 #   preflight → canary eval (10 rollouts) → canary train (20 steps)
-#   → baseline eval → 30k-step LoRA train → eval every kept checkpoint
-#   → LoRA extract + wandb artifact upload → summary alert → pod self-terminate
+#   → baseline eval → [train 5k → eval → extract+upload trainable weights] × 6
+#   → summary alert → pod self-terminate
+#
+# Why segments are equivalent to one continuous 30k run:
+#   - the LR schedule (CosineDecaySchedule, decay_steps=30000) follows the
+#     global step restored from the checkpoint, not --num-train-steps;
+#   - train.py saves/restores optimizer + data-loader state, and resumes the
+#     same wandb run via wandb_id.txt → one continuous loss curve;
+#   - orbax (max_to_keep=1) deletes an old checkpoint only AFTER the next one
+#     is committed, so there is never a window without a resumable checkpoint.
+# Each segment saves only its final checkpoint (step 4999/9999/.../29999); the
+# previous segment's checkpoint is auto-deleted after we've already evaluated
+# and archived it. Disk peak ~2 checkpoints instead of 6.
 #
 # Run inside tmux so an SSH disconnect doesn't kill it:
 #   tmux new -s train
 #   bash scripts/remote_run.sh
 #
 # Knobs (env vars):
+#   TOTAL_STEPS=30000  EVAL_EVERY=5000
 #   RUN_CANARY=1        cheap end-to-end smoke tests before the real run
-#   RUN_BASELINE=1      full 500-rollout eval of the pretrained base model
+#   RUN_BASELINE=1      full eval of the pretrained base model (before training,
+#                       so a broken eval setup is caught early)
 #   TRIALS_PER_TASK=50
-#   AUTO_TERMINATE=1    terminate the RunPod pod when done OR on failure
-#                       (set 0 while debugging interactively)
+#   AUTO_TERMINATE=1    on success: terminate the pod (everything is on wandb).
+#                       on FAILURE: stop the pod instead — /workspace survives a
+#                       stop, so training progress is kept; restart the pod and
+#                       re-run this script to resume. Set 0 while debugging.
 #
 # Stages record .done markers in $STATUS_DIR — re-running after a crash skips
-# completed work, and an interrupted training run resumes from its checkpoints.
+# completed work and resumes training from the latest checkpoint.
 set -Eeuo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/remote_env.sh"
 
+TOTAL_STEPS="${TOTAL_STEPS:-30000}"
+EVAL_EVERY="${EVAL_EVERY:-5000}"
 RUN_CANARY="${RUN_CANARY:-1}"
 RUN_BASELINE="${RUN_BASELINE:-1}"
 TRIALS_PER_TASK="${TRIALS_PER_TASK:-50}"
 AUTO_TERMINATE="${AUTO_TERMINATE:-1}"
 
-mkdir -p "$LOG_DIR" "$STATUS_DIR" "$EXPERIMENTS_DIR" "$ARTIFACTS_DIR/lora" "$CKPT_BASE"
+CKPT_DIR="$CKPT_BASE/$CONFIG_NAME/$EXP_NAME"
+
+mkdir -p "$LOG_DIR" "$STATUS_DIR" "$EXPERIMENTS_DIR" "$ARTIFACTS_DIR/trainable" "$CKPT_BASE"
 LOG="$LOG_DIR/run_$(date +%Y%m%d_%H%M%S).log"
 exec > >(tee -a "$LOG") 2>&1
 cd "$REPO_DIR"
@@ -47,7 +67,7 @@ upload_artifact() {  # path, name, type — retried; artifacts are the permanent
     return 1
 }
 
-terminate_pod() {
+terminate_pod() {  # success path: everything permanent is on wandb
     if [ "$AUTO_TERMINATE" != "1" ]; then
         echo "AUTO_TERMINATE=0 — pod left running (remember: it keeps billing!)"
         return 0
@@ -62,16 +82,32 @@ terminate_pod() {
     runpodctl remove pod "$RUNPOD_POD_ID"
 }
 
+stop_pod() {  # failure path: STOP, don't terminate — /workspace (checkpoints,
+    # dataset, venv) survives a stop at storage-only cost, so the run can resume.
+    if [ "$AUTO_TERMINATE" != "1" ]; then
+        echo "AUTO_TERMINATE=0 — pod left running for debugging (it keeps billing!)"
+        return 0
+    fi
+    if [ -z "${RUNPOD_POD_ID:-}" ] || ! command -v runpodctl > /dev/null; then
+        echo "cannot self-stop: RUNPOD_POD_ID/runpodctl missing — STOP THE POD MANUALLY"
+        return 0
+    fi
+    [ -n "${RUNPOD_API_KEY:-}" ] && runpodctl config --apiKey "$RUNPOD_API_KEY" > /dev/null
+    echo "stopping pod $RUNPOD_POD_ID in 60s (Ctrl-C to abort)"
+    sleep 60
+    runpodctl stop pod "$RUNPOD_POD_ID"
+}
+
 on_error() {
     local rc=$?
     trap - ERR
     echo "RUN FAILED (exit $rc) — log: $LOG"
     local tail_txt
     tail_txt=$(tail -n 15 "$LOG" 2>/dev/null || true)
-    notify "pi05 LIBERO run FAILED" "exit=$rc on $(hostname). Last log lines:
+    notify "pi05 LIBERO run FAILED" "exit=$rc on $(hostname). Pod will be STOPPED (state preserved) — restart it and re-run remote_run.sh to resume. Last log lines:
 $tail_txt"
     upload_artifact "$LOG" "run_log_failed" "log" || true
-    terminate_pod
+    stop_pod
     exit "$rc"
 }
 trap on_error ERR
@@ -125,48 +161,46 @@ stage_baseline() {
     upload_artifact "$EXPERIMENTS_DIR/pi05_base_benchmark/results.json" "results_baseline" "eval_results"
 }
 
-stage_train() {
-    local ckpt_dir="$CKPT_BASE/$CONFIG_NAME/$EXP_NAME"
+# Train up to a global step target. Huge --save-interval → only the segment's
+# final step (target-1) is saved. Resuming an already-finished segment is a
+# no-op: train.py restores step==target and exits without training.
+train_to() {
+    local target="$1"
     local extra=()
-    # A checkpoint dir from an interrupted run → resume (needs the wandb_id.txt
-    # that train.py wrote next to the step dirs on the first attempt).
-    if [ -d "$ckpt_dir" ] && [ -n "$(ls -A "$ckpt_dir" 2>/dev/null)" ]; then
-        echo "existing checkpoints found — resuming"
+    if find "$CKPT_DIR" -mindepth 1 -maxdepth 1 -type d -regex '.*/[0-9]+' 2>/dev/null | grep -q .; then
         extra+=(--resume)
+    elif [ -d "$CKPT_DIR" ]; then
+        # dir exists but holds no finished checkpoint (crash before first save)
+        extra+=(--overwrite)
     fi
-    notify "training started" "$CONFIG_NAME / $EXP_NAME, 30k steps."
     "$PY" scripts/train.py "$CONFIG_NAME" \
         --exp-name "$EXP_NAME" \
         --checkpoint-base-dir "$CKPT_BASE" \
+        --num-train-steps "$target" \
+        --save-interval 1000000 \
         ${extra[@]+"${extra[@]}"}
-    notify "training finished" "Kept checkpoints: $(ls "$ckpt_dir" | tr '\n' ' ')"
 }
 
-# Evaluate every kept checkpoint (5000..25000 + final 29999), then immediately
-# extract + upload its LoRA adapters so a late crash never loses finished work.
-stage_evals() {
-    local ckpt_dir="$CKPT_BASE/$CONFIG_NAME/$EXP_NAME"
-    local step_dir step marker
-    for step in $(find "$ckpt_dir" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | grep -E '^[0-9]+$' | sort -n); do
-        step_dir="$ckpt_dir/$step"
-        marker="$STATUS_DIR/eval_step_$step.done"
-        [ -f "$marker" ] && { echo "step $step already evaluated, skipping"; continue; }
+# Evaluate a saved checkpoint, then archive its trainable weights (LoRA +
+# SigLIP tower + projections — see extract_trainable.py) to wandb immediately,
+# BEFORE the next segment's save causes orbax to delete this checkpoint.
+eval_and_archive() {
+    local step="$1"
+    local step_dir="$CKPT_DIR/$step"
+    [ -d "$step_dir" ] || { echo "expected checkpoint missing: $step_dir"; return 1; }
 
-        "$PY" scripts/benchmark.py \
-            --config-name "$CONFIG_NAME" \
-            --checkpoint-dir "$step_dir" \
-            --exp-dir "$EXPERIMENTS_DIR/$EXP_NAME/step_$step" \
-            --num-trials-per-task "$TRIALS_PER_TASK" \
-            --train-step "$step"
+    "$PY" scripts/extract_trainable.py \
+        --checkpoint-dir "$step_dir" \
+        --out "$ARTIFACTS_DIR/trainable/step_$step.npz"
+    upload_artifact "$ARTIFACTS_DIR/trainable/step_$step.npz" "trainable_step_$step" "trainable_weights"
 
-        "$PY" scripts/extract_lora.py \
-            --checkpoint-dir "$step_dir" \
-            --out "$ARTIFACTS_DIR/lora/step_$step.npz"
-        upload_artifact "$ARTIFACTS_DIR/lora/step_$step.npz" "lora_step_$step" "lora_weights"
-        upload_artifact "$EXPERIMENTS_DIR/$EXP_NAME/step_$step/results.json" "results_step_$step" "eval_results"
-
-        touch "$marker"
-    done
+    "$PY" scripts/benchmark.py \
+        --config-name "$CONFIG_NAME" \
+        --checkpoint-dir "$step_dir" \
+        --exp-dir "$EXPERIMENTS_DIR/$EXP_NAME/step_$step" \
+        --num-trials-per-task "$TRIALS_PER_TASK" \
+        --train-step "$step"
+    upload_artifact "$EXPERIMENTS_DIR/$EXP_NAME/step_$step/results.json" "results_step_$step" "eval_results"
 }
 
 stage_summary() {
@@ -207,8 +241,13 @@ fi
 if [ "$RUN_BASELINE" = "1" ]; then
     stage baseline stage_baseline
 fi
-stage train stage_train
-stage_evals                         # per-step markers handle idempotency inside
+
+for target in $(seq "$EVAL_EVERY" "$EVAL_EVERY" "$TOTAL_STEPS"); do
+    step=$((target - 1))   # openpi saves the final checkpoint at num_train_steps-1
+    stage "train_to_$target" train_to "$target"
+    stage "eval_step_$step" eval_and_archive "$step"
+done
+
 stage summary stage_summary
 
 echo "ALL DONE — log: $LOG"

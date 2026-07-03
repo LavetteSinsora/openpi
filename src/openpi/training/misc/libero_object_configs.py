@@ -67,10 +67,15 @@ FFN projections in both the PaliGemma 2B backbone and the 300M action expert.
   - paligemma_variant="gemma_2b_lora":  rank=16, alpha=16 (scaling=1.0)
   - action_expert_variant="gemma_300m_lora": rank=32, alpha=32 (scaling=1.0)
 
-All non-LoRA weights are frozen via the freeze_filter returned by
-Pi0Config.get_freeze_filter() (freezes .*llm.* except .*lora.*).
+The freeze_filter returned by Pi0Config.get_freeze_filter() freezes the
+transformer weights (paths matching .*llm.*) except the LoRA adapters. Note
+that everything OUTSIDE the llm path stays trainable: the SigLIP vision tower
+(PaliGemma/img, ~400M params) and the action/time projection layers. This
+matches upstream openpi LoRA behavior — but it means a checkpoint is
+reconstructed from base + ALL trainable leaves, not base + LoRA alone
+(see scripts/extract_trainable.py).
 EMA is disabled (ema_decay=None) because EMA would allocate a full copy of
-the 2.3B-parameter model for weights that are 99.9% frozen — wasteful.
+the 2.3B-parameter model for weights that are mostly frozen — wasteful.
 
 The pre-trained π0.5 checkpoint is loaded from GCS and LoRA adapter weights
 are randomly initialised (CheckpointWeightLoader fills missing .*lora.* keys

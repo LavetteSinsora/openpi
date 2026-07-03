@@ -18,7 +18,7 @@ export DATASET_TAR="${DATASET_TAR:-libero_object_summed_subsampling.tar}"
 DATASET_EXPECTED_FILES=1504
 
 mkdir -p "$HF_LEROBOT_HOME" "$OPENPI_DATA_HOME" "$CKPT_BASE" \
-         "$EXPERIMENTS_DIR" "$ARTIFACTS_DIR/lora" "$STATUS_DIR" "$LOG_DIR"
+         "$EXPERIMENTS_DIR" "$ARTIFACTS_DIR/trainable" "$STATUS_DIR" "$LOG_DIR"
 
 echo "=== [1/6] system packages"
 export DEBIAN_FRONTEND=noninteractive
