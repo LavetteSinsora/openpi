@@ -22,6 +22,9 @@ mkdir -p "$HF_LEROBOT_HOME" "$OPENPI_DATA_HOME" "$CKPT_BASE" \
 
 echo "=== [1/6] system packages"
 export DEBIAN_FRONTEND=noninteractive
+# Ubuntu 24.04 marks the system python "externally managed" (PEP 668); we do
+# want gsutil/crcmod in it (step 4), since openpi shells out to `gsutil`.
+export PIP_BREAK_SYSTEM_PACKAGES=1
 apt-get update -qq
 apt-get install -y -qq ffmpeg libgl1 libegl1 libosmesa6 libglib2.0-0 \
     build-essential python3-dev python3-pip git curl tmux > /dev/null
