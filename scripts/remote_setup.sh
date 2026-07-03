@@ -58,7 +58,9 @@ echo "=== [4/6] gsutil for the public gs://openpi-assets bucket"
 # openpi routes gs://openpi-assets through the gsutil CLI (anonymous access
 # works — the bucket is public). Composite objects in pi05_base/params need
 # *compiled* crcmod, hence the --no-binary reinstall.
-command -v gsutil > /dev/null || python3 -m pip install -q gsutil
+# --ignore-installed: gsutil deps (e.g. cryptography) may already exist as
+# apt-installed packages that pip cannot uninstall (no RECORD file).
+command -v gsutil > /dev/null || python3 -m pip install -q --ignore-installed gsutil
 python3 -m pip install -q --no-binary :all: --force-reinstall crcmod
 gsutil version -l 2> /dev/null | grep -qi "compiled crcmod: True" \
     || { echo "compiled crcmod missing — pi05_base download would fail"; exit 1; }
@@ -78,7 +80,9 @@ path = hf_hub_download(
 )
 print(f"downloaded: {path}")
 PYEOF
-    tar -xf "$WORKSPACE/downloads/$DATASET_TAR" -C "$HF_LEROBOT_HOME"
+    # --no-same-owner: as root, tar tries to restore the archive's original
+    # uid/gid, which the pod filesystem forbids.
+    tar --no-same-owner -xf "$WORKSPACE/downloads/$DATASET_TAR" -C "$HF_LEROBOT_HOME"
     n_files=$(find "$DATASET_DIR" -type f | wc -l)
     [ "$n_files" -eq "$DATASET_EXPECTED_FILES" ] \
         || { echo "dataset incomplete: $n_files files (expected $DATASET_EXPECTED_FILES)"; exit 1; }
