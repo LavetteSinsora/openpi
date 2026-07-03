@@ -26,7 +26,7 @@
 #   RUN_CANARY=1        cheap end-to-end smoke tests before the real run
 #   RUN_BASELINE=1      full eval of the pretrained base model (before training,
 #                       so a broken eval setup is caught early)
-#   TRIALS_PER_TASK=50
+#   TRIALS_PER_TASK=20     200 rollouts per eval (aggregate SE ~3.5%)
 #   AUTO_TERMINATE=1    on success: terminate the pod (everything is on wandb).
 #                       on FAILURE: stop the pod instead — /workspace survives a
 #                       stop, so training progress is kept; restart the pod and
@@ -41,7 +41,7 @@ TOTAL_STEPS="${TOTAL_STEPS:-30000}"
 EVAL_EVERY="${EVAL_EVERY:-5000}"
 RUN_CANARY="${RUN_CANARY:-1}"
 RUN_BASELINE="${RUN_BASELINE:-1}"
-TRIALS_PER_TASK="${TRIALS_PER_TASK:-50}"
+TRIALS_PER_TASK="${TRIALS_PER_TASK:-20}"
 AUTO_TERMINATE="${AUTO_TERMINATE:-1}"
 
 CKPT_DIR="$CKPT_BASE/$CONFIG_NAME/$EXP_NAME"

@@ -50,8 +50,11 @@ check "compiled crcmod (composite-object downloads)" bash -c \
 check "wandb API key valid" bash -c \
     '[ -n "${WANDB_API_KEY:-}" ] && "$REPO_DIR/.venv/bin/wandb" login --verify'
 
-check "disk: >=60GB free on $WORKSPACE" bash -c \
-    'avail_kb=$(df -Pk --output=avail "$WORKSPACE" | tail -1); [ "$avail_kb" -ge 62914560 ] || { echo "only $((avail_kb / 1048576))GB free"; exit 1; }'
+# 15GB = room for one more checkpoint save (old + new + orbax tmp ≈ 10GB
+# transient) plus artifact staging. Sized so a resume-after-crash with
+# checkpoints already on disk still passes on a 60GB volume.
+check "disk: >=15GB free on $WORKSPACE" bash -c \
+    'avail_kb=$(df -Pk --output=avail "$WORKSPACE" | tail -1); [ "$avail_kb" -ge 15728640 ] || { echo "only $((avail_kb / 1048576))GB free"; exit 1; }'
 
 if [ "${AUTO_TERMINATE:-1}" = "1" ]; then
     check "runpodctl present (auto-terminate; else AUTO_TERMINATE=0)" command -v runpodctl

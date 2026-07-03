@@ -33,4 +33,11 @@ export TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD=1            # torch>=2.6 breaks LIBERO 
 export XLA_PYTHON_CLIENT_MEM_FRACTION=0.9
 export MPLBACKEND=Agg                                # never inherit a GUI/inline backend
 
+# Keep ALL wandb local state (run dirs, artifact staging + cache) on the volume:
+# the defaults live under ~/.cache on the small container disk, and staging six
+# ~1.7GB trainable-weights artifacts there would overflow it.
+export WANDB_DIR="$WORKSPACE/wandb"
+export WANDB_CACHE_DIR="$WORKSPACE/wandb/.cache"
+export WANDB_DATA_DIR="$WORKSPACE/wandb/.data"
+
 export PATH="$HOME/.local/bin:$PATH"                 # uv installs here
