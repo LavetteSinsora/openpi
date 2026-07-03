@@ -30,6 +30,8 @@ apt-get install -y -qq ffmpeg libgl1 libegl1 libosmesa6 libglib2.0-0 \
     build-essential python3-dev python3-pip git curl tmux > /dev/null
 
 echo "=== [2/6] uv + openpi venv (exact locked deps)"
+# Multi-GB CUDA wheels regularly exceed uv's default 30s network timeout.
+export UV_HTTP_TIMEOUT="${UV_HTTP_TIMEOUT:-120}"
 command -v uv > /dev/null || curl -LsSf https://astral.sh/uv/install.sh | sh
 (cd "$REPO_DIR" && uv sync --no-dev)
 [ -x "$PY" ] || { echo "venv python missing at $PY"; exit 1; }
