@@ -14,6 +14,7 @@ import torch
 import openpi.models.model as _model
 import openpi.training.config as _config
 from openpi.training.droid_rlds_dataset import DroidRldsDataset
+import openpi.training.egopi as egopi
 import openpi.transforms as _transforms
 
 T_co = TypeVar("T_co", covariant=True)
@@ -137,13 +138,34 @@ def create_torch_dataset(
     if repo_id == "fake":
         return FakeDataset(model_config, num_samples=1024)
 
-    dataset_meta = lerobot_dataset.LeRobotDatasetMetadata(repo_id)
+    # Optional local-dataset extensions (see openpi.training.egopi): load from a
+    # local root, use custom delta_timestamps, assert the extraction config hash,
+    # and drop datapoints whose action chunk would cross a sub-episode boundary.
+    root = data_config.dataset_root
+    if data_config.expected_config_hash is not None:
+        if root is None:
+            raise ValueError("expected_config_hash requires dataset_root to be set.")
+        actual = egopi.load_extraction_meta(root)["config_hash"]
+        if actual != data_config.expected_config_hash:
+            raise ValueError(
+                f"Dataset at {root} has extraction config_hash {actual}, "
+                f"expected {data_config.expected_config_hash}."
+            )
+
+    dataset_meta = lerobot_dataset.LeRobotDatasetMetadata(repo_id, root=root)
+    delta_timestamps = data_config.custom_delta_timestamps or {
+        key: [t / dataset_meta.fps for t in range(action_horizon)] for key in data_config.action_sequence_keys
+    }
     dataset = lerobot_dataset.LeRobotDataset(
         data_config.repo_id,
-        delta_timestamps={
-            key: [t / dataset_meta.fps for t in range(action_horizon)] for key in data_config.action_sequence_keys
-        },
+        root=root,
+        delta_timestamps=delta_timestamps,
     )
+
+    if data_config.boundary_aware:
+        if root is None:
+            raise ValueError("boundary_aware requires dataset_root to be set.")
+        dataset = egopi.make_boundary_aware(dataset, root, action_horizon)
 
     if data_config.prompt_from_task:
         dataset = TransformedDataset(dataset, [_transforms.PromptFromLeRobotTask(dataset_meta.tasks)])
