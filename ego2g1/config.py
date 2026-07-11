@@ -72,7 +72,7 @@ class Ego2G1TrainConfig:
     # automatically rescales the schedule so LR lands on final_lr at the end)
     peak_lr: float = 2.5e-5
     warmup_steps: int = 1_000
-    final_lr: float = 0.0  # LR at the last step; openpi's fine-tune configs use peak/10
+    final_lr: float = 2.5e-6  # LR at the last step; openpi convention: peak/10
     fsdp_devices: int = 1
     wandb_enabled: bool = True
     wandb_project: str = "ego2g1"
