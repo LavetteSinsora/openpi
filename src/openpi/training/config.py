@@ -98,20 +98,6 @@ class DataConfig:
     # List of datasets to sample from: name, version, weight, and optionally filter_dict_path
     datasets: Sequence[droid_rlds_dataset.RLDSDataset] = ()
 
-    # If set, overrides the default delta_timestamps built from action_sequence_keys
-    # (used by datasets that store absolute poses and build action chunks at load
-    # time, e.g. openpi.training.egopi).
-    custom_delta_timestamps: dict | None = None
-    # If set, the LeRobot dataset is loaded from this local root instead of the HF cache.
-    dataset_root: str | None = None
-    # If true, wrap the dataset with egopi.BoundaryAwareDataset (drops datapoints whose
-    # action chunk would cross a sub-episode boundary; requires dataset_root with an
-    # extraction_meta.json sidecar).
-    boundary_aware: bool = False
-    # If set, assert that the dataset's extraction_meta.json sidecar records this
-    # extraction config hash (requires dataset_root).
-    expected_config_hash: str | None = None
-
 
 class GroupFactory(Protocol):
     def __call__(self, model_config: _model.BaseModelConfig) -> _transforms.Group:
@@ -368,14 +354,6 @@ class LeRobotLiberoDataConfig(DataConfigFactory):
             data_transforms=data_transforms,
             model_transforms=model_transforms,
         )
-
-
-# Ego-pi (put_bottle_in_box) data config; defined in openpi.training.egopi and
-# bound here via a deferred factory to avoid an import cycle (egopi needs
-# DataConfigFactory, which is defined above).
-import openpi.training.egopi as egopi  # noqa: E402
-
-LeRobotEgoPiDataConfig = egopi.make_egopi_data_config_cls()
 
 
 @dataclasses.dataclass(frozen=True)
@@ -696,28 +674,6 @@ _CONFIGS = [
         weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi0_base/params"),
         # Below you can define other hyperparameters like the learning rate, number of training steps, etc.
         # Check the base TrainConfig class for a full list of available hyperparameters.
-        num_train_steps=30_000,
-    ),
-    TrainConfig(
-        # Ego-pi put_bottle_in_box (G1 + BrainCo Revo2), see data_extraction/SPEC.md in the
-        # extraction repo. The dataset stores absolute per-tick flange poses; relative (H, 30)
-        # action chunks are built at load time (egopi.RelativeChunkActions). Set the local
-        # dataset root on the command line, e.g.:
-        #   --data.dataset-root=/path/to/lerobot_datasets/ego-pi/put_bottle_in_box
-        name="pi0_egopi",
-        model=pi0_config.Pi0Config(action_horizon=50),
-        data=LeRobotEgoPiDataConfig(
-            repo_id="ego-pi/put_bottle_in_box",
-            fps=30,
-            base_config=DataConfig(
-                prompt_from_task=True,
-                boundary_aware=True,
-                # extraction pipeline config_hash stamped into extraction_meta.json;
-                # asserted when dataset_root is set.
-                expected_config_hash="d40b49a8d84b7c61",
-            ),
-        ),
-        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi0_base/params"),
         num_train_steps=30_000,
     ),
     TrainConfig(
