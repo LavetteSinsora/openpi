@@ -50,7 +50,7 @@ class Ego2G1TrainConfig:
 
     # --- training ---
     batch_size: int = 32
-    num_train_steps: int = 30_000
+    num_train_steps: int = 20000
     
     log_interval: int = 100 # interval of logging train loss, etc.
     save_interval: int = 1000 # interval of saving model checkpoint (for resuming training. new checkpoint saved, old deleted)
