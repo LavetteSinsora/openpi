@@ -53,6 +53,15 @@ def test_train_step_and_eval_step():
     assert bucket_keys, info.keys()
     for k in bucket_keys:
         assert np.isfinite(float(info[k]))
+    # gradient decomposition: groups present, finite, nonzero for the trained
+    # parts, and consistent with the global norm (sum of squares)
+    group_keys = ["grad_norm/siglip", "grad_norm/prefix_expert", "grad_norm/action_expert", "grad_norm/heads"]
+    for k in group_keys:
+        assert np.isfinite(float(info[k])), k
+    total_sq = sum(float(info[k]) ** 2 for k in group_keys)
+    np.testing.assert_allclose(total_sq, float(info["grad_norm"]) ** 2, rtol=1e-4)
+    assert float(info["grad_norm/action_expert"]) > 0
+    assert float(info["grad_norm/heads"]) > 0
 
     val_info = ego_train.eval_step(tc, jax.random.key(2), state, batch)
     assert np.isfinite(float(val_info["val/loss"]))

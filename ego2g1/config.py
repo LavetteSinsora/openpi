@@ -65,6 +65,11 @@ class Ego2G1TrainConfig:
     # rng so curves are comparable across steps); 0 disables.
     eval_interval: int = 1000
     eval_num_batches: int = 4
+    # attention-allocation probe (ego2g1.diagnostics) on a small fixed val
+    # probe batch, same cadence semantics as eval_interval; 0 disables.
+    # Runs eagerly (un-jitted manual layer loop) — expect ~tens of seconds.
+    probe_interval: int = 1000
+    probe_batch_size: int = 2
     num_workers: int = 2
     seed: int = 42
     ema_decay: float | None = 0.99
@@ -117,7 +122,7 @@ class Ego2G1TrainConfig:
         payload = {k: v for k, v in dataclasses.asdict(self).items()
                    if k not in ("exp_name", "wandb_enabled", "wandb_project", "num_workers",
                                 "log_interval", "save_interval", "keep_period", "resume", "overwrite",
-                                "eval_interval", "eval_num_batches")}
+                                "eval_interval", "eval_num_batches", "probe_interval", "probe_batch_size")}
         blob = json.dumps(payload, sort_keys=True, default=str)
         return hashlib.sha256(blob.encode()).hexdigest()[:16]
 

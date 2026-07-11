@@ -103,10 +103,25 @@ def train_step(
             lambda _, x: x.value.ndim > 1,
         ),
     )
+    # gradient decomposition by module: which part of the network training is
+    # actually moving (SigLIP vision encoder vs 2B prefix expert vs 300M action
+    # expert vs the small projection/time-MLP heads). Expert-1 params carry the
+    # "_1" name suffix (cf. Pi0Config.get_freeze_filter).
+    _img = nnx_utils.PathRegex(".*img.*")
+    _llm = nnx_utils.PathRegex(".*llm.*")
+    _expert1 = nnx_utils.PathRegex(".*llm.*_1.*")
+    grad_groups = {
+        "grad_norm/siglip": _img,
+        "grad_norm/prefix_expert": nnx.All(_llm, nnx.Not(_expert1)),
+        "grad_norm/action_expert": _expert1,
+        "grad_norm/heads": nnx.All(nnx.Not(_img), nnx.Not(_llm)),
+    }
+
     info = {
         "loss": loss,
         "grad_norm": optax.global_norm(grads),
         "param_norm": optax.global_norm(kernel_params),
+        **{k: optax.global_norm(grads.filter(f)) for k, f in grad_groups.items()},
         **{f"loss/{k}": v for k, v in _slot_bucket_means(chunked_loss, config.model.action_horizon).items()},
     }
     return new_state, info
@@ -131,6 +146,29 @@ def eval_step(
         "val/loss": jnp.mean(chunked_loss),
         **{f"val/{k}": v for k, v in _slot_bucket_means(chunked_loss, config.model.action_horizon).items()},
     }
+
+
+def _attention_probe(config: _config.Ego2G1TrainConfig, state: training_utils.TrainState, val_batch) -> dict:
+    """Attention allocation of action tokens on a small fixed probe batch
+    (ego2g1.diagnostics), reduced to wandb scalars: mass per token group,
+    overall and at the first/last layer, plus mean attention entropy.
+    Eager (un-jitted); uses EMA params like eval_step."""
+    from ego2g1 import diagnostics as _diagnostics
+
+    params = state.ema_params if state.ema_params is not None else state.params
+    model = nnx.merge(state.model_def, params)
+    model.eval()
+    obs, actions = jax.tree.map(lambda x: x[: config.probe_batch_size], val_batch)
+    out = _diagnostics.attention_allocation(model, obs, actions)
+    per_layer = out["per_layer"]  # (L, G)
+    payload = {}
+    for g, name in enumerate(out["group_names"]):
+        key = name.replace("/", "_")
+        payload[f"attn/{key}"] = float(per_layer[:, g].mean())
+        payload[f"attn_first_layer/{key}"] = float(per_layer[0, g])
+        payload[f"attn_last_layer/{key}"] = float(per_layer[-1, g])
+    payload["attn/entropy"] = float(out["entropy_per_layer"].mean())
+    return payload
 
 
 def _load_stock_train_module():
@@ -297,6 +335,8 @@ def main(config: _config.Ego2G1TrainConfig):
             val_reduced = jax.device_get(jax.tree.map(jnp.mean, common_utils.stack_forest(val_infos)))
             pbar.write(f"Step {step} [val]: " + ", ".join(f"{k}={v:.4f}" for k, v in val_reduced.items()))
             wandb.log(val_reduced, step=step)
+        if val_batches and config.probe_interval > 0 and (step % config.probe_interval == 0 or step == config.num_train_steps - 1):
+            wandb.log(_attention_probe(config, train_state, val_batches[0]), step=step)
         if (step % config.save_interval == 0 and step > start_step) or step == config.num_train_steps - 1:
             _checkpoints.save_state(checkpoint_manager, train_state, data_loader, step)
 

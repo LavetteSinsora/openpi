@@ -131,9 +131,11 @@ def token_groups(model: _pi0.Pi0, obs: _model.Observation) -> TokenGroups:
     (images in obs.images order, then text) + the action suffix."""
     names, bounds = [], []
     start = 0
+    n = None  # all cameras share one resolution -> one SigLIP call to count tokens
     for name in obs.images:
-        image_tokens, _ = model.PaliGemma.img(obs.images[name], train=False)
-        n = image_tokens.shape[1]
+        if n is None:
+            image_tokens, _ = model.PaliGemma.img(obs.images[name], train=False)
+            n = image_tokens.shape[1]
         names.append(f"img/{name}")
         bounds.append((start, start + n))
         start += n
