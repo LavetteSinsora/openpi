@@ -197,7 +197,7 @@ def _to_openpi_train_config(config: _config.Ego2G1TrainConfig, data_cfg) -> _ope
         weight_loader=config.weight_loader(),
         data=_Fixed(repo_id=config.repo_id),
         optimizer=config.optimizer,
-        lr_schedule=config.lr_schedule,
+        lr_schedule=config.lr_schedule(),
         batch_size=config.batch_size,
         num_train_steps=config.num_train_steps,
         log_interval=config.log_interval,

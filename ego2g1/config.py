@@ -20,56 +20,46 @@ from ego2g1 import transforms as _transforms
 
 @dataclasses.dataclass(frozen=True)
 class Ego2G1TrainConfig:
-    name: str = "ego2g1_pi05"
-    exp_name: str = "ego2g1"
+    name: str = "ego2g1_pi05" # name of this config
+    exp_name: str = "ego2g1" # name of specific experiment using this config
 
     # --- data ---
-    # dataset root dir (holds meta/, data/, videos/ and extraction_meta.json)
-    dataset_root: str = "../../lerobot_datasets/ego2g1/put_bottle_in_box"
-    repo_id: str = "ego2g1/put_bottle_in_box"
-    # data_extraction config hash this run expects; asserted against the
-    # sidecar before anything else. ALWAYS read from the sidecar of the
-    # dataset actually being trained on — never trust remembered values.
-    expected_config_hash: str | None = None
-    fps: int = 30
-    hands: tuple[str, ...] = ("left", "right")
-    # held-out REAL episodes (sidecar `source_episode` values); fixed list,
-    # never re-rolled. Empty = no split yet (norm stats then use everything).
-    val_real_episodes: tuple[str, ...] = ()
+    dataset_root: str = "../../lerobot_datasets/ego2g1/put_bottle_in_box" # directory where dataset lives (data read directly from this)
+    repo_id: str = "ego2g1/put_bottle_in_box" # norm stats are written to assets/<name>/<repo_id>/
+    expected_config_hash: str | None = None # hash of the data_extraction config expected to use. copy that directly from the dataset you inspected and want to use (extraction_meta.json)
+    fps: int = 30 # data's corresponding frequency (how many actions correspond to 1 second of expected execution)
+    hands: tuple[str, ...] = ("left", "right") # order of hand in action label (i.e., which hand occupies the first 15-dim of the action)
+    val_real_episodes: tuple[str, ...] = () # which episodes are validation episodes and should be held-out for norm stat calculation
 
     # --- model ---
     action_dim: int = 32  # pi05_base padded width
-    action_dim_actual: int = 30
+    action_dim_actual: int = 30 # actual dimension of the action (loss in padded dim is masked)
     action_horizon: int = 50
-    # prompt: π0.5 pretraining control-mode marker (appended, see transforms)
-    control_mode: str = _transforms.CONTROL_MODE_EEF
+    control_mode: str = _transforms.CONTROL_MODE_EEF # pi0.5 pretraining appends "<control mode> joint/end effector <control mode>" as text tokens in thhe prompt
 
-    # --- E001 floored per-slot rescale ---
-    # c=1.0 reproduces stock pooled behavior exactly; decided start: 0.1.
-    per_slot_floor_c: float = 0.1
+    # --- normalization ---
+    per_slot_floor_c: float = 0.1 # parameter for per dim, per time-slot normalization
     # action dims allowed to have degenerate stats (norm.check_stats_sanity):
-    # left-hand command dims 12..17 (left hand unused in put_bottle_in_box).
-    degenerate_dim_allowlist: tuple[int, ...] = (12, 13, 14, 15, 16, 17)
+    # left-hand command dims 9..14 (left hand unused in put_bottle_in_box;
+    # layout per hand [eef 9 | hand 6] in `hands` order, SPEC.md).
+    degenerate_dim_allowlist: tuple[int, ...] = (9, 10, 11, 12, 13, 14)
 
-    # --- train-time RTC (phase 1: off; code feature-complete) ---
+    # --- train-time RTC ---
     rtc_training: bool = False
-    rtc_d_max: int = 16  # provisional 4060 estimate, TRAINING_PLAN.md §1
+    rtc_d_max: int = 16  # maximum expected inference time (expressed in # of timesteps)
 
     # --- training ---
     batch_size: int = 32
     num_train_steps: int = 30_000
-    log_interval: int = 100
-    save_interval: int = 1000
-    keep_period: int = 5000
-    # in-loop validation (normalized-unit compute_loss on the val split, fixed
-    # rng so curves are comparable across steps); 0 disables.
-    eval_interval: int = 1000
+    
+    log_interval: int = 100 # interval of logging train loss, etc.
+    save_interval: int = 1000 # interval of saving model checkpoint (for resuming training. new checkpoint saved, old deleted)
+    keep_period: int = 5000 # interval of storing not-deleted checkpoints (for offline diagnostic)
+    eval_interval: int = 1000 # interval of running eval (e.g., record loss on validation set), 0 disables 
     eval_num_batches: int = 4
-    # attention-allocation probe (ego2g1.diagnostics) on a small fixed val
-    # probe batch, same cadence semantics as eval_interval; 0 disables.
-    # Runs eagerly (un-jitted manual layer loop) — expect ~tens of seconds.
-    probe_interval: int = 1000
+    probe_interval: int = 1000 # interval of running attention allocation probe
     probe_batch_size: int = 2
+    
     num_workers: int = 2
     seed: int = 42
     ema_decay: float | None = 0.99
@@ -77,11 +67,12 @@ class Ego2G1TrainConfig:
     assets_base_dir: str = "./assets"
     weight_loader_params_path: str = "gs://openpi-assets/checkpoints/pi05_base/params"
     optimizer: _optimizer.OptimizerConfig = dataclasses.field(default_factory=_optimizer.AdamW)
-    lr_schedule: _optimizer.LRScheduleConfig = dataclasses.field(
-        default_factory=lambda: _optimizer.CosineDecaySchedule(
-            warmup_steps=1_000, peak_lr=2.5e-5, decay_steps=30_000, decay_lr=2.5e-6
-        )
-    )
+    # --- learning rate: cosine with warmup; the decay horizon is ALWAYS
+    # num_train_steps (no separate decay_steps knob — changing the run length
+    # automatically rescales the schedule so LR lands on final_lr at the end)
+    peak_lr: float = 2.5e-5
+    warmup_steps: int = 1_000
+    final_lr: float = 0.0  # LR at the last step; openpi's fine-tune configs use peak/10
     fsdp_devices: int = 1
     wandb_enabled: bool = True
     wandb_project: str = "ego2g1"
@@ -93,8 +84,18 @@ class Ego2G1TrainConfig:
             raise ValueError(
                 f"action_dim_actual={self.action_dim_actual} != 15*len(hands)={15 * len(self.hands)}"
             )
+        if self.warmup_steps >= self.num_train_steps:
+            raise ValueError(f"warmup_steps={self.warmup_steps} >= num_train_steps={self.num_train_steps}")
 
     # --- derived ---
+
+    def lr_schedule(self) -> _optimizer.CosineDecaySchedule:
+        return _optimizer.CosineDecaySchedule(
+            warmup_steps=self.warmup_steps,
+            peak_lr=self.peak_lr,
+            decay_steps=self.num_train_steps,
+            decay_lr=self.final_lr,
+        )
 
     def model_config(self) -> _model.Ego2G1Pi0Config:
         return _model.Ego2G1Pi0Config(

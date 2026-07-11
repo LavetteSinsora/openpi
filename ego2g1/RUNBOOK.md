@@ -27,7 +27,7 @@ openpi's flax scan (this bit us locally).
 uv run python -m pytest ego2g1/tests -q     # fingerprint guard + golden identity on THIS box
 ```
 
-All 29 must pass (1 skip is normal: the chunk-math equivalence test runs in
+All must pass (1 skip is normal: the chunk-math equivalence test runs in
 the outer repo). This validates the gemma-patch fingerprint against the
 checkout and bitwise-stock behavior with features off.
 

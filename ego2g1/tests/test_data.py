@@ -233,3 +233,18 @@ def test_config_c1_not_required():
 
     cfg = _config.Ego2G1TrainConfig(per_slot_floor_c=1.0)
     assert cfg.feature_flags()["per_slot_rescale"]["required"] is False
+
+
+def test_lr_schedule_tracks_num_train_steps():
+    from ego2g1 import config as _config
+
+    cfg = _config.Ego2G1TrainConfig(num_train_steps=12_345)
+    sched = cfg.lr_schedule()
+    assert sched.decay_steps == 12_345
+    assert sched.decay_lr == cfg.final_lr
+    # the optax schedule really lands on final_lr at the last step
+    lr_fn = sched.create()
+    assert abs(float(lr_fn(12_345)) - cfg.final_lr) < 1e-9
+    assert float(lr_fn(cfg.warmup_steps)) > float(lr_fn(12_000))
+    with pytest.raises(ValueError):
+        _config.Ego2G1TrainConfig(num_train_steps=500, warmup_steps=1_000)
