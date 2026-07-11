@@ -61,6 +61,10 @@ class Ego2G1TrainConfig:
     log_interval: int = 100
     save_interval: int = 1000
     keep_period: int = 5000
+    # in-loop validation (normalized-unit compute_loss on the val split, fixed
+    # rng so curves are comparable across steps); 0 disables.
+    eval_interval: int = 1000
+    eval_num_batches: int = 4
     num_workers: int = 2
     seed: int = 42
     ema_decay: float | None = 0.99
@@ -112,7 +116,8 @@ class Ego2G1TrainConfig:
         """Hash of every field that affects the produced training data/model."""
         payload = {k: v for k, v in dataclasses.asdict(self).items()
                    if k not in ("exp_name", "wandb_enabled", "wandb_project", "num_workers",
-                                "log_interval", "save_interval", "keep_period", "resume", "overwrite")}
+                                "log_interval", "save_interval", "keep_period", "resume", "overwrite",
+                                "eval_interval", "eval_num_batches")}
         blob = json.dumps(payload, sort_keys=True, default=str)
         return hashlib.sha256(blob.encode()).hexdigest()[:16]
 
