@@ -89,6 +89,10 @@ def fetch(bucket: str, name: str, size: int, retries: int = 12) -> None:
     dest.parent.mkdir(parents=True, exist_ok=True)
     url = f"https://storage.googleapis.com/{bucket}/{urllib.parse.quote(name)}"
     tmp = dest.with_name(dest.name + ".part")
+    if size == 0:  # zero-byte marker object (e.g. commit_success.txt)
+        dest.write_bytes(b"")
+        print(f"  {0.0:9.1f} / 0.0 MB  {name[-60:]}")
+        return
     attempt = 0
     while True:
         done = tmp.stat().st_size if tmp.exists() else 0
