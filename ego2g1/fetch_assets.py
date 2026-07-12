@@ -11,13 +11,17 @@ Stdlib only. Usage from the openpi root:
     python ego2g1/fetch_assets.py gs://openpi-assets/checkpoints/pi05_base/params
 """
 
+import http.client
 import json
 import os
 import pathlib
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
+
+RETRYABLE = (urllib.error.URLError, ConnectionError, TimeoutError, http.client.HTTPException)
 
 DEFAULT_ASSETS = [
     "gs://big_vision/paligemma_tokenizer.model",
@@ -56,7 +60,10 @@ def list_objects(bucket: str, prefix: str):
             return
 
 
-def fetch(bucket: str, name: str, size: int) -> None:
+def fetch(bucket: str, name: str, size: int, retries: int = 12) -> None:
+    """Download with resume (HTTP Range on the .part file) and exponential
+    backoff — the route to storage.googleapis.com may reset connections
+    intermittently; progress is never lost across retries or reruns."""
     dest = CACHE / bucket / name
     if dest.exists() and dest.stat().st_size == size:
         print(f"  cached  {name}")
@@ -64,12 +71,34 @@ def fetch(bucket: str, name: str, size: int) -> None:
     dest.parent.mkdir(parents=True, exist_ok=True)
     url = f"https://storage.googleapis.com/{bucket}/{urllib.parse.quote(name)}"
     tmp = dest.with_name(dest.name + ".part")
-    done = 0
-    with urllib.request.urlopen(url, timeout=300) as r, open(tmp, "wb") as f:
-        while chunk := r.read(1 << 22):  # 4 MiB
-            f.write(chunk)
-            done += len(chunk)
-            print(f"\r  {done / 1e6:9.1f} / {size / 1e6:.1f} MB  {name[-60:]}", end="", flush=True)
+    attempt = 0
+    while True:
+        done = tmp.stat().st_size if tmp.exists() else 0
+        if done > size:
+            tmp.unlink()
+            done = 0
+        if done == size:
+            break
+        try:
+            req = urllib.request.Request(url)
+            if done:
+                req.add_header("Range", f"bytes={done}-")
+            with urllib.request.urlopen(req, timeout=120) as r, open(tmp, "ab" if done else "wb") as f:
+                while chunk := r.read(1 << 22):  # 4 MiB
+                    f.write(chunk)
+                    done += len(chunk)
+                    print(f"\r  {done / 1e6:9.1f} / {size / 1e6:.1f} MB  {name[-60:]}", end="", flush=True)
+            if done == size:
+                break
+            raise ConnectionError(f"short read at {done}/{size} bytes")
+        except RETRYABLE as e:
+            attempt += 1
+            if attempt > retries:
+                print()
+                raise
+            wait = min(2**attempt, 60)
+            print(f"\r  retry {attempt}/{retries} in {wait}s at {done / 1e6:.1f} MB ({type(e).__name__})  ", flush=True)
+            time.sleep(wait)
     print()
     if tmp.stat().st_size != size:
         raise RuntimeError(f"{name}: got {tmp.stat().st_size} bytes, expected {size}")
