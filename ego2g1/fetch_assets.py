@@ -23,6 +23,24 @@ import urllib.request
 
 RETRYABLE = (urllib.error.URLError, ConnectionError, TimeoutError, http.client.HTTPException)
 
+
+def _urlopen_retry(req, *, timeout: int, retries: int = 12):
+    """urlopen with exponential backoff on transient network/TLS errors.
+    A non-transient HTTPError (404/401) is re-raised immediately."""
+    attempt = 0
+    while True:
+        try:
+            return urllib.request.urlopen(req, timeout=timeout)
+        except urllib.error.HTTPError:
+            raise  # a real HTTP status, not a transport hiccup — don't retry
+        except RETRYABLE as e:
+            attempt += 1
+            if attempt > retries:
+                raise
+            wait = min(2**attempt, 60)
+            print(f"  retry {attempt}/{retries} in {wait}s ({type(e).__name__})", flush=True)
+            time.sleep(wait)
+
 DEFAULT_ASSETS = [
     "gs://big_vision/paligemma_tokenizer.model",
     "gs://openpi-assets/checkpoints/pi05_base/params",
@@ -37,7 +55,7 @@ def head_object(bucket: str, name: str) -> int | None:
     url = f"https://storage.googleapis.com/{bucket}/{urllib.parse.quote(name)}"
     req = urllib.request.Request(url, method="HEAD")
     try:
-        with urllib.request.urlopen(req, timeout=60) as r:
+        with _urlopen_retry(req, timeout=60) as r:
             return int(r.headers["Content-Length"])
     except urllib.error.HTTPError:
         return None
@@ -51,7 +69,7 @@ def list_objects(bucket: str, prefix: str):
         query = {"prefix": prefix, "fields": "items(name,size),nextPageToken", "maxResults": "1000"}
         if token:
             query["pageToken"] = token
-        with urllib.request.urlopen(f"{base}?{urllib.parse.urlencode(query)}", timeout=60) as r:
+        with _urlopen_retry(f"{base}?{urllib.parse.urlencode(query)}", timeout=60) as r:
             page = json.load(r)
         for item in page.get("items", []):
             yield item["name"], int(item["size"])
@@ -91,6 +109,9 @@ def fetch(bucket: str, name: str, size: int, retries: int = 12) -> None:
             if done == size:
                 break
             raise ConnectionError(f"short read at {done}/{size} bytes")
+        except urllib.error.HTTPError:
+            print()
+            raise
         except RETRYABLE as e:
             attempt += 1
             if attempt > retries:
