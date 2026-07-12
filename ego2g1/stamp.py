@@ -18,6 +18,9 @@ STAMP_FILENAME = "ego2g1_stamp.json"
 # outside this set (e.g. from a newer ego2g1) must be refused.
 SUPPORTED_FEATURES = frozenset({
     "per_slot_rescale",
+    "per_slot_center",
+    "degenerate_neutralization",
+    "model_space_clamp",
     "control_mode_prompt",
     "relative_chunk_actions",
     "action_dim_actual",

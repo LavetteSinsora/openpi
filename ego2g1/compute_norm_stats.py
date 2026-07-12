@@ -59,13 +59,19 @@ def main(config: _config.Ego2G1TrainConfig, batch_size: int = 128):
 
     pooled = {"state": _normalize.RunningStats(), "actions": _normalize.RunningStats()}
     per_slot = _PerSlotRunning()
+    raw_min = np.full(config.action_dim_actual, np.inf)
+    raw_max = np.full(config.action_dim_actual, -np.inf)
 
     def flush(buf):
+        nonlocal raw_min, raw_max
         actions = np.stack([s["actions"] for s in buf])  # (N, H, D_real)
         states = np.stack([s["state"] for s in buf])
         pooled["actions"].update(actions.reshape(-1, actions.shape[-1]))
         pooled["state"].update(states.reshape(-1, states.shape[-1]))
         per_slot.update(actions)
+        flat = actions.reshape(-1, actions.shape[-1])
+        raw_min = np.minimum(raw_min, flat.min(axis=0))
+        raw_max = np.maximum(raw_max, flat.max(axis=0))
 
     buf = []
     for i in tqdm.tqdm(range(len(dataset)), desc="Computing stats (train split)"):
@@ -83,6 +89,7 @@ def main(config: _config.Ego2G1TrainConfig, batch_size: int = 128):
     norm_stats = {k: v.get_statistics() for k, v in pooled.items()}
     per_slot_stats = _norm.PerSlotStats(
         sigma_slot=per_slot.sigma(),
+        mu_slot=per_slot.mean,
         provenance={
             "extraction_config_hash": meta["config_hash"],
             "ego2g1_config_hash": config.config_hash(),
@@ -91,9 +98,25 @@ def main(config: _config.Ego2G1TrainConfig, batch_size: int = 128):
         },
     )
 
-    problems = _norm.check_stats_sanity(norm_stats, per_slot_stats, config.degenerate_dim_allowlist)
+    problems = _norm.check_stats_sanity(
+        norm_stats, per_slot_stats, config.degenerate_dim_allowlist,
+        raw_min=raw_min, raw_max=raw_max,
+    )
     if problems:
         raise SystemExit("Stats sanity check FAILED:\n  " + "\n  ".join(problems))
+
+    # certify + report what the data path will do with these stats
+    act = norm_stats["actions"]
+    deg = _norm.degenerate_action_dims(act, config.action_dim_actual)
+    span = act.q99[: config.action_dim_actual] - act.q01[: config.action_dim_actual] + 1e-6
+    n_extreme = np.maximum(
+        np.abs((raw_min - act.q01[: config.action_dim_actual]) / span * 2.0 - 1.0),
+        np.abs((raw_max - act.q01[: config.action_dim_actual]) / span * 2.0 - 1.0),
+    )
+    print(f"degenerate dims (neutralized to -1 in the data path): {np.flatnonzero(deg).tolist()}")
+    print(f"max |normalized| on live dims: {n_extreme[~deg].max():.1f} "
+          f"(dim {int(np.flatnonzero(~deg)[n_extreme[~deg].argmax()])}); "
+          f"model-space clamp: {config.model_space_clamp}")
 
     output_dir = config.assets_dirs / config.repo_id
     print(f"Writing pooled norm_stats.json and {_norm.PER_SLOT_FILENAME} to: {output_dir}")
@@ -102,7 +125,7 @@ def main(config: _config.Ego2G1TrainConfig, batch_size: int = 128):
 
     # eyeball report: per-slot sigma + effective E001 boost
     sigma_pooled = norm_stats["actions"].std[: config.action_dim_actual]
-    gain = per_slot_stats.gain(config.per_slot_floor_c, sigma_pooled)
+    gain = per_slot_stats.gain(config.per_slot_floor_c, sigma_pooled, degenerate_mask=deg)
     with np.printoptions(precision=2, suppress=True, linewidth=200):
         print(f"sigma_slot (H, {config.action_dim_actual}), slots 0/9/24/49:")
         for k in (0, 9, 24, 49):

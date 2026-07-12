@@ -64,7 +64,12 @@ uv run python -m ego2g1.compute_norm_stats "${FLAGS[@]}"
 Writes `assets/ego2g1_pi05/<repo_id>/{norm_stats.json,per_slot_stats.npz}`
 (run from the openpi root so `./assets` matches training), prints the
 per-slot sigma grid + E001 gains for eyeballing, and hard-fails on
-non-allowlisted degenerate dims.
+non-allowlisted degenerate dims and on unmasked spike-tail dims (max
+|normalized| gate).
+
+Since the centering/degeneracy refactor the per-slot artifact also carries
+`mu_slot` — stats computed by older code will be refused at train time when
+`per_slot_center` is on (the default). Regenerate rather than reuse.
 
 ## 5. Train
 

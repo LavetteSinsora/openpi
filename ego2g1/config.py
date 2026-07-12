@@ -29,7 +29,13 @@ class Ego2G1TrainConfig:
     expected_config_hash: str | None = None # hash of the data_extraction config expected to use. copy that directly from the dataset you inspected and want to use (extraction_meta.json)
     fps: int = 30 # data's corresponding frequency (how many actions correspond to 1 second of expected execution)
     hands: tuple[str, ...] = ("left", "right") # order of hand in action label (i.e., which hand occupies the first 15-dim of the action)
-    val_real_episodes: tuple[str, ...] = () # which episodes are validation episodes and should be held-out for norm stat calculation
+    val_real_episodes: tuple[str, ...] = (
+        "put_bottle_in_box/episode_10", "put_bottle_in_box/episode_20",
+        "put_bottle_in_box/episode_30", "put_bottle_in_box/episode_40",
+        "put_bottle_in_box/episode_50", "put_bottle_in_box/episode_60",
+        "put_bottle_in_box/episode_70", "put_bottle_in_box/episode_80",
+        "put_bottle_in_box/episode_90",
+    ) # which episodes are validation episodes and should be held-out for norm stat calculation
 
     # --- model ---
     action_dim: int = 32  # pi05_base padded width
@@ -39,9 +45,23 @@ class Ego2G1TrainConfig:
 
     # --- normalization ---
     per_slot_floor_c: float = 0.1 # parameter for per dim, per time-slot normalization
+    # Per-slot centering, applied ONLY to the EEF-delta dims (first 9 of each
+    # hand's 15): subtract the per-slot mean before the gain, so the 1/c boost
+    # lands on motion deviation rather than on constants (rot6d diagonals
+    # otherwise become ~+10 targets at slot 0). Hand-command dims are absolute
+    # and get gain ~1 anyway — never centered ("flat = hold still" preserved).
+    per_slot_center: bool = True
+    # Final |target| bound in model space (after centering + gain): caps
+    # heavy-tail outliers (dim 7 reaches |normalized| ~ 25) so no single label
+    # can dominate a batch. Train-side label surgery only; no serving inverse
+    # exists or is needed. None disables.
+    model_space_clamp: float | None = 10.0
     # action dims allowed to have degenerate stats (norm.check_stats_sanity):
     # left-hand command dims 9..14 (left hand unused in put_bottle_in_box;
-    # layout per hand [eef 9 | hand 6] in `hands` order, SPEC.md).
+    # layout per hand [eef 9 | hand 6] in `hands` order, SPEC.md). Degenerate
+    # dims (norm.degenerate_action_dims mask) are also NEUTRALIZED to -1 in
+    # the data path — allowlisting alone would let their spike-tail outliers
+    # (measured |normalized| up to 3.7e5 on dims 13/14) reach the loss.
     degenerate_dim_allowlist: tuple[int, ...] = (9, 10, 11, 12, 13, 14)
 
     # --- train-time RTC ---
@@ -86,6 +106,8 @@ class Ego2G1TrainConfig:
             )
         if self.warmup_steps >= self.num_train_steps:
             raise ValueError(f"warmup_steps={self.warmup_steps} >= num_train_steps={self.num_train_steps}")
+        if self.model_space_clamp is not None and self.model_space_clamp <= 1.0:
+            raise ValueError(f"model_space_clamp={self.model_space_clamp} must be > 1 (or None)")
 
     # --- derived ---
 
@@ -135,6 +157,12 @@ class Ego2G1TrainConfig:
                 "required": self.per_slot_floor_c < 1.0,
                 "floor_c": self.per_slot_floor_c,
             },
+            # serving MUST add the per-slot mean back (else centered dims are biased)
+            "per_slot_center": {"required": self.per_slot_center},
+            # serving MUST neutralize degenerate state dims like training did
+            "degenerate_neutralization": {"required": True},
+            # train-side label surgery only; informational
+            "model_space_clamp": {"required": False, "value": self.model_space_clamp},
             "control_mode_prompt": {"required": True, "mode": self.control_mode},
             "relative_chunk_actions": {"required": True},
             **{k: {"required": False, "value": v}

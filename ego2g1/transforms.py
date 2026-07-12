@@ -95,29 +95,60 @@ class Ego2G1Outputs(_transforms.DataTransformFn):
 
 @dataclasses.dataclass(frozen=True)
 class PerSlotRescale(_transforms.DataTransformFn):
-    """E001 forward: actions_out[k, d] = actions_in[k, d] * gain[k, d], where
-    gain = sigma_pooled / max(sigma_slot, c * sigma_pooled) (ego2g1.norm).
-    Operates on pooled-quantile-NORMALIZED actions of exactly (H, D_real)."""
+    """E001 forward, on pooled-quantile-NORMALIZED data. In order:
+
+    1. neutralize degenerate dims (degenerate_action_dims mask): actions AND
+       state overwritten with -1.0 (where their constant resting value maps),
+       so spike-tail outliers (|n| ~ 1e5 on raw dims 13/14) never reach the
+       model, at train or serve time;
+    2. center: actions -= mu_n (per-slot mean in normalized units; zeroed on
+       non-centered dims — hand commands and degenerate dims);
+    3. rescale: actions *= gain, gain = sigma_pooled / max(sigma_slot, c*sigma_pooled);
+    4. clamp to +-clamp in model space — the airtight bound on target magnitude.
+
+    Actions must be exactly (H, D_real); a sample without an actions key (the
+    inference input path) still gets its state neutralized."""
 
     gain: np.ndarray  # (H, D_real) float32
+    mu_n: np.ndarray | None = None  # (H, D_real) f32, zeros where not centered
+    degenerate_mask: np.ndarray | None = None  # (D_real,) bool
+    clamp: float | None = None
 
     def __call__(self, data: dict) -> dict:
-        if "actions" not in data:
-            return data
-        actions = np.asarray(data["actions"])
+        out = dict(data)
+        d_real = self.gain.shape[1]
+        if self.degenerate_mask is not None and "state" in out:
+            state = np.asarray(out["state"]).astype(np.float32).copy()
+            if state.shape[-1] < d_real:
+                raise ValueError(f"state {state.shape} vs degenerate mask ({d_real},)")
+            state[..., :d_real][..., self.degenerate_mask] = -1.0
+            out["state"] = state
+        if "actions" not in out:
+            return out
+        actions = np.asarray(out["actions"]).astype(np.float64)
         if actions.shape[-2:] != self.gain.shape:
             raise ValueError(f"actions {actions.shape} vs per-slot gain {self.gain.shape}")
-        return {**data, "actions": (actions * self.gain).astype(np.float32)}
+        if self.degenerate_mask is not None:
+            actions[..., self.degenerate_mask] = -1.0
+        if self.mu_n is not None:
+            actions = actions - self.mu_n
+        actions = actions * self.gain
+        if self.clamp is not None:
+            actions = np.clip(actions, -self.clamp, self.clamp)
+        return {**out, "actions": actions.astype(np.float32)}
 
 
 @dataclasses.dataclass(frozen=True)
 class PerSlotRescaleInverse(_transforms.DataTransformFn):
-    """E001 inverse: divide model output by the training gain grid. MANDATORY
-    before pooled Unnormalize for E001-trained checkpoints (skipping it
-    inflates early slots by up to 1/c in real units). Runs on the padded
-    model output (H, D_model >= D_real); pad dims pass through."""
+    """E001 inverse: undo gain then centering on the model output. MANDATORY
+    before pooled Unnormalize for E001-trained checkpoints (skipping the gain
+    inflates early slots by up to 1/c in real units; skipping mu_n BIASES
+    centered dims). Runs on the padded model output (H, D_model >= D_real);
+    pad dims pass through. Neutralized dims have gain 1 / mu 0, so the model's
+    learned constant flows back to the resting command via Unnormalize."""
 
     gain: np.ndarray  # (H, D_real) float32
+    mu_n: np.ndarray | None = None  # (H, D_real) f32, zeros where not centered
 
     def __call__(self, data: dict) -> dict:
         actions = np.asarray(data["actions"])
@@ -126,4 +157,6 @@ class PerSlotRescaleInverse(_transforms.DataTransformFn):
             raise ValueError(f"actions {actions.shape} vs per-slot gain {self.gain.shape}")
         out = actions.astype(np.float32).copy()
         out[..., :d_real] = out[..., :d_real] / self.gain
+        if self.mu_n is not None:
+            out[..., :d_real] = out[..., :d_real] + self.mu_n
         return {**data, "actions": out}

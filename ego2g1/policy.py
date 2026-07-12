@@ -48,6 +48,10 @@ def config_from_stamp(stamp: dict) -> _config.Ego2G1TrainConfig:
     for k in ("hands", "val_real_episodes", "degenerate_dim_allowlist"):
         if k in cfg_dict and isinstance(cfg_dict[k], list):
             cfg_dict[k] = tuple(cfg_dict[k])
+    # Checkpoints stamped before a feature existed were trained WITHOUT it —
+    # missing keys must resolve to the legacy behavior, never to a new default.
+    cfg_dict.setdefault("per_slot_center", False)
+    cfg_dict.setdefault("model_space_clamp", None)
     return _config.Ego2G1TrainConfig(**cfg_dict)
 
 
