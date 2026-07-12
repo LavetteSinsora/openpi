@@ -42,6 +42,13 @@ class Ego2G1TrainConfig:
     action_dim_actual: int = 30 # actual dimension of the action (loss in padded dim is masked)
     action_horizon: int = 50
     control_mode: str = _transforms.CONTROL_MODE_EEF # pi0.5 pretraining appends "<control mode> joint/end effector <control mode>" as text tokens in thhe prompt
+    # pi05 convention: the (normalized) state is digitized into 256 bins and fed
+    # as text tokens in the prompt ("Task: ..., State: 12 240 ...;\nAction: ").
+    # WARNING: False makes the policy state-BLIND — the pi05 architecture has no
+    # continuous state token (that's the pi0 path), so the prompt is the ONLY
+    # way proprioception reaches the model. False also changes the prompt
+    # template away from what pi05_base pretrained with.
+    discrete_state_input: bool = True
 
     # --- normalization ---
     per_slot_floor_c: float = 0.1 # parameter for per dim, per time-slot normalization
@@ -56,13 +63,7 @@ class Ego2G1TrainConfig:
     # can dominate a batch. Train-side label surgery only; no serving inverse
     # exists or is needed. None disables.
     model_space_clamp: float | None = 10.0
-    # action dims allowed to have degenerate stats (norm.check_stats_sanity):
-    # left-hand command dims 9..14 (left hand unused in put_bottle_in_box;
-    # layout per hand [eef 9 | hand 6] in `hands` order, SPEC.md). Degenerate
-    # dims (norm.degenerate_action_dims mask) are also NEUTRALIZED to -1 in
-    # the data path — allowlisting alone would let their spike-tail outliers
-    # (measured |normalized| up to 3.7e5 on dims 13/14) reach the loss.
-    degenerate_dim_allowlist: tuple[int, ...] = (9, 10, 11, 12, 13, 14)
+    degenerate_dim_allowlist: tuple[int, ...] = (9, 10, 11, 12, 13, 14) # action dimensions that can have degenerate stats (e.g., all zeros when left hand never moved). Included dimensions might be filled to -1 depending on whether value fluctuation is too small.
 
     # --- train-time RTC ---
     rtc_training: bool = False
@@ -127,6 +128,7 @@ class Ego2G1TrainConfig:
             action_dim_actual=self.action_dim_actual,
             rtc_training=self.rtc_training,
             rtc_d_max=self.rtc_d_max,
+            discrete_state_input=self.discrete_state_input,
         )
 
     @property

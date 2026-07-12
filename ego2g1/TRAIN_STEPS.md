@@ -1,5 +1,5 @@
 # ego2g1 training
-Train pi0.5 on PPU with already-configured venv in /openpi.
+Train pi0.5 on PPU with already-configured venv in `~/openpi`.
 
 ## Clone repo
 
@@ -26,55 +26,40 @@ source ~/openpi-ego2g1/ego2g1/env.sh
 python -m pytest ego2g1/tests -q         
 ```
 
-2. Compute normalization stats:
+2. Fetch GCS assets over plain HTTPS (one-time; the venv has no gcsfs — do NOT pip install):
+```bash
+python ego2g1/fetch_assets.py        # paligemma tokenizer (4 MB) + pi05_base params (12.4 GB)
+```
+Files land in `~/.cache/openpi/` (override: `OPENPI_DATA_HOME`); skip-if-cached, safe to re-run.
+
+3. Compute normalization stats:
 ```bash
 python -m ego2g1.compute_norm_stats
 ```
-Normalization stats are written to  `assets/<cfg.name>/<repo_id>/`.
+Normalization stats are written to `assets/<cfg.name>/<repo_id>/`.
+Episodes in `cfg.val_real_episodes` are excluded when calculating norm stats.
 
-## 3. Train
+4. Train (inside tmux — an SSH drop must not kill the run):
 
 ```bash
-python -m ego2g1.train --exp-name run1
+wandb login                       
+python -m ego2g1.train --exp-name exp_name     # env.sh already sets XLA_PYTHON_CLIENT_MEM_FRACTION
 ```
+Checkpoints are written to `checkpoints/<cfg.name>/<cfg.exp_name>/<step>/`.
+Only keeper steps survive on disk: every `keep_period` (5k) plus the latest.
+Use `--resume` to resume training from most recent checkpoint.
 
-- first run downloads pi05_base (~10 GB, cached in `~/.cache/openpi`)
-- first train step takes minutes (XLA compilation) — not a hang
-- one 96 GB device fits the model; all visible devices are used data-parallel.
-  For a shakedown run on one device, restrict visibility (vendor equivalent of
-  CUDA_VISIBLE_DEVICES). To shard the model itself: `--fsdp-devices N`.
-- checkpoints: `checkpoints/ego2g1_pi05/run1/<step>/`, every 1k steps,
-  keepers every 5k, stamp at the run root. Resume after a crash: same command
-  + `--resume`.
-
-## 4. Health checklist
-
-Startup (first minute):
-- [ ] hash assert passes; no config/sidecar errors
-- [ ] `Loaded 4 fixed val batches (... from 9 real episodes)` — MUST appear
-- [ ] wandb `camera_views`: egocentric image present, both wrist slots black
-
-Curves (wandb):
-- [ ] `loss` starts O(1-2), drops steeply first ~500 steps, then grinds down
-- [ ] `loss/slots_00_04` ~ same order as `slots_05_24` / `slots_25_49`, all
-      declining (early-slot bucket stuck high = the E001/centering diagnostic)
-- [ ] `val/loss` every 1k steps tracks train down; where it bottoms out is the
-      checkpoint to serve
-- [ ] `grad_norm` stable O(1-10), no spikes/NaN; all four `grad_norm/*`
-      components nonzero
-- [ ] utilization: `watch -n1 nvidia-smi` (or vendor smi) — high util with
-      brief dips at save/eval; sawtooth-to-zero = input-bound, raise num_workers
-
-Any NaN, flat-from-start loss, or missing val line: stop, keep the log.
-
-## 5. Serve / inspect a checkpoint
+## Serve policy
 
 ```python
 from ego2g1 import policy
-p = policy.create_policy("checkpoints/ego2g1_pi05/run1/19999")  # step dir; stamp-guarded
-```
+p = policy.create_policy("checkpoints/ego2g1_pi05/run1/15000",
+                         default_prompt="put the bottle in the box")
 
-The stamp guard is mandatory: this run's checkpoints require per_slot_center +
-degenerate_neutralization; stock openpi serving code will (correctly) be
-refused, and skipping the inverse transforms would execute biased/mis-scaled
-actions on the robot.
+from openpi.serving import websocket_policy_server
+websocket_policy_server.WebsocketPolicyServer(p, host="0.0.0.0", port=8000).serve_forever()
+```
+Serving must run from this repo (`source ego2g1/env.sh`, then python from the repo
+root): the custom transforms + their mandatory inverses live in `ego2g1/`, and
+`create_policy` is the only loader that applies them (stamp-guarded). The step
+passed must be a keeper that exists on disk (multiple of 5k, or the latest).
