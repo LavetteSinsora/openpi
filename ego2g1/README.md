@@ -50,10 +50,6 @@ Use `--resume` to resume training from most recent checkpoint.
 
 ## Serve policy
 
-Run inside tmux (the server blocks until killed). Pick a checkpoint step that
-exists on disk: `ls checkpoints/ego2g1_pi05/run1/` (keepers = multiples of 5k,
-plus the latest).
-
 ```bash
 source ~/openpi-ego2g1/ego2g1/env.sh
 python - <<'EOF'
