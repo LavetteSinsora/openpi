@@ -1,6 +1,6 @@
 """Phase 1 (headless box): teacher-forced policy rollout -> eval_rollout.npz.
 
-Runs the checkpoint through the EXACT deployment stack (ego2g1.policy.create_policy
+Runs the checkpoint through the EXACT deployment stack (ego2g1.serve.create_policy
 -> Policy.infer -> sample_actions Euler integration) on the real recorded observations,
 and dumps the raw action chunks + anchor states. No mujoco/mink/display.
 
@@ -36,9 +36,13 @@ def _resolve_episode(root, args) -> int:
     return idx[0]
 
 
-def _synthetic_gt_actions(ep: dio.EpisodeData, query_ticks, horizon) -> np.ndarray:
+def gt_actions(ep: dio.EpisodeData, query_ticks, horizon) -> np.ndarray:
     """Actions that reconstruct the recorded label exactly: eef delta =
-    inv(pose_anchor) @ pose_{t+1+k}, hand = hand[t+1+k] (held past the end)."""
+    inv(pose_anchor) @ pose_{t+1+k}, hand = hand[t+1+k] (held past the end).
+
+    The canonical chunk construction: `deploy.dataset_client` serves these to the
+    real control loop, so an on-robot replay and `--synthetic-gt` cannot drift
+    apart in how they read the labels."""
     from ego2g1.chunk_math import se3_to_vec9, vec9_to_se3
 
     T = ep.n_frames
@@ -59,7 +63,7 @@ def _synthetic_gt_actions(ep: dio.EpisodeData, query_ticks, horizon) -> np.ndarr
 def _policy_actions(ep, query_ticks, horizon, action_dim, args) -> np.ndarray:
     import jax
 
-    from ego2g1 import policy as _policy
+    from ego2g1.serve import policy as _policy
 
     p = _policy.create_policy(args.checkpoint, default_prompt=ep.task, assets_dir=args.assets_dir)
     p._sample_kwargs = {"num_steps": args.num_steps}  # deployment denoise steps  # noqa: SLF001
@@ -106,12 +110,12 @@ def main():
     horizon, action_dim = 50, 32
     provenance = {"extraction_config_hash": None, "ego2g1_config_hash": None}
     if args.synthetic_gt:
-        actions = _synthetic_gt_actions(ep, query_ticks, horizon)
+        actions = gt_actions(ep, query_ticks, horizon)
         mode = "synthetic_gt"
     else:
         if not args.checkpoint:
             ap.error("--checkpoint required unless --synthetic-gt")
-        from ego2g1 import policy as _policy
+        from ego2g1.serve import policy as _policy
         from ego2g1 import stamp as _stamp
         stamp = _stamp.check_supported(_policy.resolve_run_dir(args.checkpoint))
         cfg = _policy.config_from_stamp(stamp)

@@ -1,0 +1,26 @@
+# Robot-PC dependencies. Deliberately NOT the training stack — no jax, no openpi
+# core. The client talks to the policy over a websocket and never loads a model.
+#
+#   pip install -e packages/openpi-client
+#   pip install -r ego2g1/deploy/requirements.txt
+#
+# Plus, not installable from PyPI:
+#   unitree_sdk2py  — git clone https://github.com/unitreerobotics/unitree_sdk2_python
+#                     (pulls in cyclonedds; pin the version their README states)
+#   unitree_deploy  — the vendor repo, for its ImageClient camera only
+#
+# And on the G1 board itself, the image server must be running or the camera
+# never produces a frame:
+#   ssh unitree@192.168.123.164   # password: 123
+#   conda activate tv && cd ~/image_server && python image_server.py
+
+numpy
+websockets            # openpi-client's transport
+msgpack               # openpi-client's wire format
+tyro                  # CLI
+mujoco                # the G1 model, for FK
+mink                  # differential IK — the SAME solver data_extraction used
+qpsolvers[daqp]       # mink's QP backend
+opencv-python         # camera check only
+pyzmq                 # ImageClient transport
+rerun-sdk             # live dashboard (log at chunk rate, never from the 500 Hz thread)
