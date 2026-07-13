@@ -70,18 +70,22 @@ def create_data_config(
     model_config,
     *,
     norm_assets_dir: pathlib.Path | str,
+    per_slot_dir: pathlib.Path | str | None = None,
     skip_norm_stats: bool = False,
 ) -> _config.DataConfig:
-    """Build the full DataConfig. `norm_assets_dir` is where the two stats
-    artifacts live: the config assets dir at train time, the checkpoint's
-    assets/<asset_id>/ dir at serving (policy.py passes that explicitly)."""
+    """Build the full DataConfig. `norm_assets_dir` holds norm_stats.json (the
+    config assets dir at train time; the checkpoint's assets/<asset_id>/ dir at
+    serving). `per_slot_dir` holds per_slot_stats.npz — defaults to
+    norm_assets_dir, but serving passes the run-level assets_ego2g1 dir, so the
+    two artifacts never have to live in the same directory."""
     norm_assets_dir = pathlib.Path(norm_assets_dir)
+    per_slot_dir = pathlib.Path(per_slot_dir) if per_slot_dir is not None else norm_assets_dir
 
     norm_stats = None
     per_slot_transforms = None
     if not skip_norm_stats:
         norm_stats = _normalize.load(norm_assets_dir)
-        per_slot = _norm.load_per_slot(norm_assets_dir)
+        per_slot = _norm.load_per_slot(per_slot_dir)
         per_slot_transforms = build_per_slot_transforms(train_config, norm_stats, per_slot)
 
     data_transforms = _transforms.Group(

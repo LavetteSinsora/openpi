@@ -66,43 +66,47 @@ def config_from_stamp(stamp: dict) -> _config.Ego2G1TrainConfig:
 NORM_STATS_FILENAME = "norm_stats.json"
 
 
-def resolve_norm_assets(checkpoint_dir, run_dir, train_config, assets_dir=None) -> pathlib.Path:
-    """One dir holding BOTH norm_stats.json and per_slot_stats.npz.
+def resolve_norm_assets(checkpoint_dir, run_dir, train_config, assets_dir=None
+                        ) -> tuple[pathlib.Path, pathlib.Path]:
+    """-> (pooled_dir with norm_stats.json, per_slot_dir with per_slot_stats.npz).
+
+    The two artifacts may live in different directories (the checkpoint keeps
+    pooled stats per step but the per-slot grid once at the run root), so they
+    are resolved independently and NOTHING is written into the checkpoint.
     Resolution order documented in the module docstring."""
     from ego2g1 import norm as _norm
 
-    def complete(d: pathlib.Path) -> bool:
-        return (d / NORM_STATS_FILENAME).exists() and (d / _norm.PER_SLOT_FILENAME).exists()
+    pooled_ck = checkpoint_dir / "assets" / train_config.repo_id
+    per_slot_ck_run = run_dir / "assets_ego2g1"
+    train_assets = train_config.assets_dirs / train_config.repo_id
+    searched = []
+
+    def pick(filename, candidates):
+        for d in candidates:
+            searched.append(d / filename)
+            if (d / filename).exists():
+                return d
+        return None
 
     if assets_dir is not None:
         d = pathlib.Path(assets_dir)
-        if not complete(d):
-            raise FileNotFoundError(
-                f"--assets-dir {d} must contain both {NORM_STATS_FILENAME} and {_norm.PER_SLOT_FILENAME}"
-            )
-        return d
+        missing = [f for f in (NORM_STATS_FILENAME, _norm.PER_SLOT_FILENAME) if not (d / f).exists()]
+        if missing:
+            raise FileNotFoundError(f"--assets-dir {d} is missing {missing}")
+        return d, d
 
-    # 2. the checkpoint's own copies (preferred — provably what it trained with)
-    pooled_dir = checkpoint_dir / "assets" / train_config.repo_id
-    per_slot_dir = run_dir / "assets_ego2g1"
-    if (pooled_dir / NORM_STATS_FILENAME).exists() and (
-        (pooled_dir / _norm.PER_SLOT_FILENAME).exists() or (per_slot_dir / _norm.PER_SLOT_FILENAME).exists()
-    ):
-        return _merged_assets(pooled_dir, per_slot_dir)
-
-    # 3. the training-time assets dir (what compute_norm_stats wrote / train read)
-    train_assets = train_config.assets_dirs / train_config.repo_id
-    if complete(train_assets):
-        print(f"WARNING: checkpoint carries no bundled norm assets ({pooled_dir} incomplete); "
-              f"falling back to the training assets dir {train_assets}. Confirm these stats are the "
-              "ones this checkpoint was trained with (they are not pinned to it).")
-        return train_assets
-
-    raise FileNotFoundError(
-        f"no norm assets found. Looked in the checkpoint ({pooled_dir} + {per_slot_dir}) and the "
-        f"training assets dir ({train_assets}). Run `python -m ego2g1.compute_norm_stats` from the "
-        "openpi root, or pass --assets-dir explicitly."
-    )
+    pooled = pick(NORM_STATS_FILENAME, [pooled_ck, train_assets])
+    per_slot = pick(_norm.PER_SLOT_FILENAME, [pooled_ck, per_slot_ck_run, train_assets])
+    if pooled is None or per_slot is None:
+        raise FileNotFoundError(
+            "norm assets not found. Searched:\n  " + "\n  ".join(str(p) for p in searched) +
+            "\nRun `python -m ego2g1.compute_norm_stats` from the openpi root, or pass --assets-dir."
+        )
+    if pooled == train_assets or per_slot == train_assets:
+        print(f"WARNING: falling back to the training assets dir {train_assets} (the checkpoint does not "
+              "carry its own copies). Confirm these stats are the ones this checkpoint trained with — "
+              "they are not pinned to it.")
+    return pooled, per_slot
 
 
 def create_policy(checkpoint_dir: str | pathlib.Path, *, default_prompt: str | None = None,
@@ -116,9 +120,9 @@ def create_policy(checkpoint_dir: str | pathlib.Path, *, default_prompt: str | N
 
     model = model_config.load(_model.restore_params(checkpoint_dir / "params", dtype=jnp.bfloat16))
 
-    norm_assets_dir = resolve_norm_assets(checkpoint_dir, run_dir, train_config, assets_dir)
+    pooled_dir, per_slot_dir = resolve_norm_assets(checkpoint_dir, run_dir, train_config, assets_dir)
     data_cfg = _data_config.create_data_config(
-        train_config, model_config, norm_assets_dir=norm_assets_dir,
+        train_config, model_config, norm_assets_dir=pooled_dir, per_slot_dir=per_slot_dir,
     )
 
     import openpi.transforms as transforms
@@ -139,21 +143,3 @@ def create_policy(checkpoint_dir: str | pathlib.Path, *, default_prompt: str | N
         metadata={"ego2g1_stamp": {k: stamp[k] for k in ("feature_flags", "ego2g1_config_hash",
                                                           "extraction_config_hash", "openpi_commit")}},
     )
-
-
-def _merged_assets(pooled_dir: pathlib.Path, per_slot_dir: pathlib.Path) -> pathlib.Path:
-    """data_config expects one dir with both artifacts; symlink them together."""
-    from ego2g1 import norm as _norm
-
-    link = pooled_dir / _norm.PER_SLOT_FILENAME
-    if link.exists():
-        return pooled_dir
-    target = per_slot_dir / _norm.PER_SLOT_FILENAME
-    if not target.exists():
-        raise FileNotFoundError(
-            f"per-slot stats not found at {target}; this checkpoint cannot be served with E001 semantics"
-        )
-    if link.is_symlink():  # broken link from a moved/deleted target: repair
-        link.unlink()
-    link.symlink_to(target)
-    return pooled_dir

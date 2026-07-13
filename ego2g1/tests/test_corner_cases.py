@@ -349,28 +349,47 @@ def test_config_from_stamp_roundtrip(tmp_path):
     assert rebuilt.config_hash() == cfg.config_hash()
 
 
-def test_merged_assets_from_train_layout(tmp_path):
+def test_resolve_norm_assets_from_train_layout(tmp_path, monkeypatch):
+    """The two artifacts live in DIFFERENT dirs in a real run (pooled per step,
+    per-slot at the run root). Resolution must find each independently and never
+    write into the checkpoint. Exercised with a RELATIVE checkpoint path — the
+    shape that broke the old symlink-merge."""
     cfg = _config.Ego2G1TrainConfig()
     run_dir, step_dir = _fake_run_dir(tmp_path, cfg)
-    pooled_dir = step_dir / "assets" / cfg.repo_id
-    per_slot_dir = _policy.resolve_run_dir(step_dir) / "assets_ego2g1"
+    monkeypatch.chdir(tmp_path)  # so a relative step path is realistic
+    rel_step = step_dir.relative_to(tmp_path)
 
-    merged = _policy._merged_assets(pooled_dir, per_slot_dir)
-    pooled = _norm.load_pooled(merged)
-    per_slot = _norm.load_per_slot(merged)
-    gain = per_slot.gain(cfg.per_slot_floor_c, pooled["actions"].std[: cfg.action_dim_actual])
+    pooled, per_slot = _policy.resolve_norm_assets(rel_step, _policy.resolve_run_dir(rel_step), cfg)
+    assert pooled == rel_step / "assets" / cfg.repo_id
+    assert per_slot == _policy.resolve_run_dir(rel_step) / "assets_ego2g1"
+    gain = _norm.load_per_slot(per_slot).gain(
+        cfg.per_slot_floor_c, _norm.load_pooled(pooled)["actions"].std[: cfg.action_dim_actual])
     assert gain.shape == (2, 30) and np.isfinite(gain).all()
-    # idempotent
-    assert _policy._merged_assets(pooled_dir, per_slot_dir) == merged
+    # nothing was written into the checkpoint's assets dir
+    assert not (pooled / _norm.PER_SLOT_FILENAME).exists()
 
-    # broken symlink (target deleted) is repaired, missing target raises
-    target = per_slot_dir / _norm.PER_SLOT_FILENAME
-    target.unlink()
-    with pytest.raises(FileNotFoundError, match="per-slot"):
-        _policy._merged_assets(pooled_dir, per_slot_dir)
-    _norm.save_per_slot(per_slot_dir, _norm.PerSlotStats(np.full((2, 30), 0.25), {}))
-    merged = _policy._merged_assets(pooled_dir, per_slot_dir)
-    np.testing.assert_array_equal(_norm.load_per_slot(merged).sigma_slot, 0.25)
+
+def test_resolve_norm_assets_falls_back_to_training_dir(tmp_path, monkeypatch):
+    cfg = _config.Ego2G1TrainConfig()
+    monkeypatch.chdir(tmp_path)
+    train_assets = cfg.assets_dirs / cfg.repo_id  # assets/<name>/<repo_id>, from CWD
+    d = np.zeros(30)
+    _normalize.save(train_assets, {"actions": _normalize.NormStats(mean=d, std=d + 1, q01=d - 1, q99=d + 1),
+                                   "state": _normalize.NormStats(mean=d, std=d + 1, q01=d - 1, q99=d + 1)})
+    _norm.save_per_slot(train_assets, _norm.PerSlotStats(np.full((2, 30), 0.5), {}, mu_slot=np.zeros((2, 30))))
+
+    empty = tmp_path / "ck" / "5000"
+    pooled, per_slot = _policy.resolve_norm_assets(empty, empty.parent, cfg)
+    assert pooled == train_assets and per_slot == train_assets
+
+
+def test_resolve_norm_assets_explicit_and_missing(tmp_path, monkeypatch):
+    cfg = _config.Ego2G1TrainConfig()
+    monkeypatch.chdir(tmp_path)  # isolate from any real ./assets in the repo
+    with pytest.raises(FileNotFoundError, match="missing"):
+        _policy.resolve_norm_assets(tmp_path, tmp_path, cfg, assets_dir=tmp_path)
+    with pytest.raises(FileNotFoundError, match="Searched"):
+        _policy.resolve_norm_assets(tmp_path / "nope", tmp_path / "nope", cfg)
 
 
 def test_config_hash_scope():
