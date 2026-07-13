@@ -61,7 +61,7 @@ def _policy_actions(ep, query_ticks, horizon, action_dim, args) -> np.ndarray:
 
     from ego2g1 import policy as _policy
 
-    p = _policy.create_policy(args.checkpoint, default_prompt=ep.task)
+    p = _policy.create_policy(args.checkpoint, default_prompt=ep.task, assets_dir=args.assets_dir)
     p._sample_kwargs = {"num_steps": args.num_steps}  # deployment denoise steps  # noqa: SLF001
     base_key = jax.random.key(args.seed)
     out = np.zeros((len(query_ticks), horizon, 30), np.float32)
@@ -79,6 +79,10 @@ def _policy_actions(ep, query_ticks, horizon, action_dim, args) -> np.ndarray:
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--checkpoint", help="step dir, e.g. checkpoints/ego2g1_pi05/run1/10000")
+    ap.add_argument("--assets-dir", default=None,
+                    help="dir with norm_stats.json + per_slot_stats.npz. Default: the checkpoint's own "
+                         "copies, else the training assets dir assets/<name>/<repo_id> (run from the "
+                         "openpi root). Pass explicitly to override.")
     ap.add_argument("--dataset-root", required=True)
     ap.add_argument("--episode", type=int, help="LeRobot episode index")
     ap.add_argument("--source-episode", help="e.g. put_bottle_in_box/episode_10 (first sub-ep used)")
