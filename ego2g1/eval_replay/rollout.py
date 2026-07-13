@@ -64,10 +64,10 @@ def _policy_actions(ep, query_ticks, horizon, action_dim, args) -> np.ndarray:
     p = _policy.create_policy(args.checkpoint, default_prompt=ep.task, assets_dir=args.assets_dir)
     p._sample_kwargs = {"num_steps": args.num_steps}  # deployment denoise steps  # noqa: SLF001
     base_key = jax.random.key(args.seed)
+    frames = dio.read_video_frames_at(ep.video_path, query_ticks, ep.fps)  # one decode pass
     out = np.zeros((len(query_ticks), horizon, 30), np.float32)
     for q, t in enumerate(query_ticks):
-        img = dio.read_video_frame(ep.video_path, t)
-        obs = {"observation/image": img, "observation/state": ep.state[t], "prompt": ep.task}
+        obs = {"observation/image": frames[q], "observation/state": ep.state[t], "prompt": ep.task}
         noise = np.asarray(jax.random.normal(jax.random.fold_in(base_key, q), (horizon, action_dim)))
         result = p.infer(obs, noise=noise)
         actions = np.asarray(result["actions"])  # (horizon, 30) raw units

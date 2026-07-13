@@ -34,6 +34,7 @@ class EpisodeData:
     hand_right: np.ndarray  # (T, 6) f32
     video_path: pathlib.Path
     real_end: bool
+    fps: float
 
 
 def _info(root: pathlib.Path) -> dict:
@@ -96,45 +97,84 @@ def load_episode(root, episode_index: int) -> EpisodeData:
         hand_right=stack("hand.right"),
         video_path=video_path(root, episode_index),
         real_end=bool(ep_meta["episode_real_end"]),
+        fps=float(_info(root).get("fps", 30)),
     )
 
 
-def read_video_frames(path, n_expected: int | None = None) -> np.ndarray:
-    """Decode the whole mp4 -> (T, H, W, 3) uint8 RGB. Uses OpenCV's bundled
-    ffmpeg (sidesteps the torchcodec breakage)."""
+# The datasets are AV1-encoded (meta/info.json: video.codec = av1). Decoders are
+# tried in the order below so we use whatever already works on the machine:
+#   1. lerobot's own decoder — the exact path TRAINING uses, so it works wherever
+#      training works (whichever backend that box has: torchcodec/pyav/...);
+#   2. PyAV directly (its wheels bundle libdav1d);
+#   3. OpenCV (many builds cannot decode AV1: "Failed to get pixel format").
+
+def _decode_lerobot(path, indices, fps) -> np.ndarray:
+    import torch
+    from lerobot.common.datasets.video_utils import decode_video_frames
+
+    timestamps = [float(i) / fps for i in indices]
+    frames = decode_video_frames(pathlib.Path(path), timestamps, 1.0 / fps / 2.0)  # (N,C,H,W) float [0,1]
+    arr = (frames.clamp(0, 1) * 255).to(torch.uint8).permute(0, 2, 3, 1).numpy()
+    return np.ascontiguousarray(arr)
+
+
+def _decode_pyav(path, indices) -> np.ndarray:
+    import av
+
+    want, got, last = {int(i) for i in indices}, {}, max(int(i) for i in indices)
+    with av.open(str(path)) as container:
+        for i, frame in enumerate(container.decode(video=0)):
+            if i in want:
+                got[i] = frame.to_ndarray(format="rgb24")
+            if i >= last:
+                break
+    if set(got) != want:
+        raise RuntimeError(f"pyav decoded {len(got)}/{len(want)} requested frames")
+    return np.stack([got[int(i)] for i in indices])
+
+
+def _decode_cv2(path, indices) -> np.ndarray:
     import cv2
 
+    want, got, last = {int(i) for i in indices}, {}, max(int(i) for i in indices)
     cap = cv2.VideoCapture(str(path))
     if not cap.isOpened():
-        raise FileNotFoundError(f"could not open video {path}")
-    frames = []
-    while True:
-        ok, frame = cap.read()
-        if not ok:
-            break
-        frames.append(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
-    cap.release()
-    if not frames:
-        raise RuntimeError(f"no frames decoded from {path}")
-    arr = np.stack(frames)
-    if n_expected is not None and len(arr) != n_expected:
-        # LeRobot videos are 1:1 with frames; a mismatch is worth surfacing but
-        # not fatal (clip to the shorter of the two at the call site).
-        print(f"WARNING: video {path.name} has {len(arr)} frames, expected {n_expected}")
-    return arr
+        raise RuntimeError(f"OpenCV could not open {path}")
+    try:
+        i = 0
+        while i <= last:
+            ok, frame = cap.read()
+            if not ok:
+                break
+            if i in want:
+                got[i] = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            i += 1
+    finally:
+        cap.release()
+    if set(got) != want:
+        raise RuntimeError(f"OpenCV decoded {len(got)}/{len(want)} frames (AV1 unsupported in this build?)")
+    return np.stack([got[int(i)] for i in indices])
 
 
-def read_video_frame(path, index: int) -> np.ndarray:
-    """Decode a single frame (T,H,W,3-less) -> (H, W, 3) uint8 RGB, by seeking.
-    Used in Phase 1 where only the query-tick frames are needed."""
-    import cv2
+def read_video_frames_at(path, indices, fps: float = 30.0) -> np.ndarray:
+    """Decode just `indices` -> (len(indices), H, W, 3) uint8 RGB, trying the
+    decoders above in order. Same pixels the policy saw in training."""
+    errors = []
+    for name, fn in (("lerobot", lambda: _decode_lerobot(path, indices, fps)),
+                     ("pyav", lambda: _decode_pyav(path, indices)),
+                     ("opencv", lambda: _decode_cv2(path, indices))):
+        try:
+            return fn()
+        except Exception as e:  # noqa: BLE001 — try the next backend
+            errors.append(f"{name}: {type(e).__name__}: {e}")
+    raise RuntimeError(
+        f"could not decode {path} (AV1). Tried:\n  " + "\n  ".join(errors) +
+        "\nInstall a working decoder, e.g. `pip install --user av`."
+    )
 
-    cap = cv2.VideoCapture(str(path))
-    if not cap.isOpened():
-        raise FileNotFoundError(f"could not open video {path}")
-    cap.set(cv2.CAP_PROP_POS_FRAMES, int(index))
-    ok, frame = cap.read()
-    cap.release()
-    if not ok:
-        raise RuntimeError(f"could not read frame {index} from {path}")
-    return cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+
+def read_video_frames(path, n_expected: int | None = None, fps: float = 30.0) -> np.ndarray:
+    """Decode the whole video -> (T, H, W, 3) uint8 RGB."""
+    if n_expected is None:
+        raise ValueError("n_expected (episode frame count) is required")
+    return read_video_frames_at(path, range(n_expected), fps)

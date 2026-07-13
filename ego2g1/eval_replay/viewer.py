@@ -116,7 +116,7 @@ def main():
                          "— dataset copy mismatch")
     print(f"episode {episode_index} ({ep.source_episode}) — {ep.n_frames} frames, mode={str(dump['mode'])}")
 
-    video = dio.read_video_frames(ep.video_path, ep.n_frames)
+    video = dio.read_video_frames(ep.video_path, ep.n_frames, ep.fps)
     T = min(ep.n_frames, len(video))
 
     mount = None
