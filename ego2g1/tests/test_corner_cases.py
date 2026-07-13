@@ -18,7 +18,7 @@ from ego2g1 import chunk_math
 from ego2g1 import config as _config
 from ego2g1 import dataset as _dataset
 from ego2g1 import norm as _norm
-from ego2g1 import policy as _policy
+from ego2g1.serve import policy as _policy
 from ego2g1 import stamp as _stamp
 from ego2g1 import train as _train
 from ego2g1 import transforms as ego_transforms

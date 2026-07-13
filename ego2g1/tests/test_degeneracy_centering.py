@@ -16,7 +16,7 @@ import openpi.shared.normalize as _normalize
 from ego2g1 import config as _config
 from ego2g1 import data_config as _data_config
 from ego2g1 import norm as _norm
-from ego2g1 import policy as _policy
+from ego2g1.serve import policy as _policy
 from ego2g1 import stamp as _stamp
 from ego2g1 import transforms as ego_transforms
 

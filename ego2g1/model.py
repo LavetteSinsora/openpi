@@ -245,3 +245,126 @@ class Ego2G1Pi0(_pi0.Pi0):
 
         x_0, _ = jax.lax.while_loop(cond, step, (x_init, 1.0))
         return x_0
+
+    @at.typecheck
+    def sample_actions_guided(
+        self,
+        rng: at.KeyArrayLike,
+        observation: _model.Observation,
+        prefix_actions: at.Float[at.Array, "b ah ad"],
+        weights: at.Float[at.Array, " ah"],
+        *,
+        num_steps: int | at.Int[at.Array, ""] = 10,
+        max_guidance_weight: float = 10.0,
+        use_vjp: bool = True,
+        noise: at.Float[at.Array, "b ah ad"] | None = None,
+    ) -> _model.Actions:
+        """Inference-time RTC (arXiv 2506.07339) for a checkpoint NOT trained with
+        RTC. Adds an inpainting guidance term to the flow field, pulling the new
+        chunk's early slots toward `prefix_actions` (the previous chunk's tail,
+        re-anchored and pushed through the input transforms into MODEL space).
+
+        Unlike `sample_actions_rtc`, this uses SCALAR timesteps — the stock
+        `embed_suffix` path. That is the whole point: with `rtc_training=False`
+        the model has never seen a per-token timestep, so feeding it one is
+        out-of-distribution. Here the model is called exactly as it was trained
+        and the entire RTC effect lives in the velocity correction.
+
+        openpi flow convention (from compute_loss): x_t = t*noise + (1-t)*x_1 and
+        v = noise - x_1, hence x_1 = x_t - t*v. LeRobot's RTC uses the same
+        convention, so its formulas port directly; PI's Kinetix reference uses the
+        flipped one (tau = 1 - t) and its signs must NOT be copied across.
+
+        `weights` is the (ah,) soft mask from ego2g1.serve.rtc.prefix_weights:
+        1.0 on slots already committed, decaying to 0 across the overlap, 0
+        beyond it. Slots with weight 0 are generated freely.
+
+        `use_vjp=False` selects the identity-Jacobian approximation (correction =
+        error, no backward pass). That is what the LeRobot/unitree-deploy port
+        actually computes, due to a `requires_grad_` ordering bug; it is free, so
+        it is kept here as a deliberate A/B fallback rather than an accident.
+        """
+        if not self.pi05:
+            raise NotImplementedError("sample_actions_guided requires the pi05 (adaRMS) path")
+        observation = _model.preprocess_observation(None, observation, train=False)
+
+        dt = -1.0 / num_steps
+        batch_size = observation.state.shape[0]
+        if noise is None:
+            noise = jax.random.normal(rng, (batch_size, self.action_horizon, self.action_dim))
+
+        # KV cache over the (constant) prefix: x_t enters only the suffix, so the
+        # VJP below traverses the action expert, never the 3B VLM.
+        prefix_tokens, prefix_mask, prefix_ar_mask = self.embed_prefix(observation)
+        prefix_attn_mask = _pi0.make_attn_mask(prefix_mask, prefix_ar_mask)
+        positions = jnp.cumsum(prefix_mask, axis=1) - 1
+        _, kv_cache = self.PaliGemma.llm([prefix_tokens, None], mask=prefix_attn_mask, positions=positions)
+
+        # Guide ONLY the real action dims. Dims [action_dim_actual, action_dim) are
+        # zero padding: compute_loss slices them out, so the model gets no gradient
+        # there and its output is unconstrained garbage. prefix_actions is zero on
+        # those dims, so the error there is a meaningless residual — and the VJP's
+        # J^T would smear it back across the REAL dims. Mask it at the source.
+        dim_mask = jnp.ones((self.action_dim,), dtype=jnp.float32)
+        if self.action_dim_actual is not None:
+            dim_mask = dim_mask.at[self.action_dim_actual:].set(0.0)
+        w = weights[None, :, None] * dim_mask[None, None, :]  # (1, ah, ad)
+
+        def velocity(x_t, time):
+            # scalar-per-sample timestep -> stock embed_suffix (trained path)
+            t_vec = jnp.broadcast_to(time, (batch_size,))
+            suffix_tokens, suffix_mask, suffix_ar_mask, adarms_cond = self.embed_suffix(observation, x_t, t_vec)
+            suffix_attn_mask = _pi0.make_attn_mask(suffix_mask, suffix_ar_mask)
+            prefix_attn = jnp.broadcast_to(
+                prefix_mask[:, None, :], (batch_size, suffix_tokens.shape[1], prefix_mask.shape[1])
+            )
+            full_attn_mask = jnp.concatenate([prefix_attn, suffix_attn_mask], axis=-1)
+            pos = jnp.sum(prefix_mask, axis=-1)[:, None] + jnp.cumsum(suffix_mask, axis=-1) - 1
+            (_, suffix_out), _ = self.PaliGemma.llm(
+                [None, suffix_tokens],
+                mask=full_attn_mask,
+                positions=pos,
+                kv_cache=kv_cache,
+                adarms_cond=[None, adarms_cond],
+            )
+            return self.action_out_proj(suffix_out[:, -self.action_horizon :])
+
+        def step(carry):
+            x_t, time = carry
+
+            def clean(x):
+                """x -> (predicted clean chunk, velocity). x_1 = x_t - t*v."""
+                v = velocity(x, time)
+                return x - time * v, v
+
+            if use_vjp:
+                x_1, vjp_fn, v_t = jax.vjp(clean, x_t, has_aux=True)
+                err = (prefix_actions - x_1) * w
+                correction = vjp_fn(err)[0]
+            else:
+                x_1, v_t = clean(x_t)
+                err = (prefix_actions - x_1) * w
+                correction = err  # identity-Jacobian approximation
+
+            # guidance weight: (t^2 + (1-t)^2) / (t*(1-t)), clipped. U-shaped, so it
+            # is large at both ends of the trajectory and the clip is what keeps it
+            # finite there (the paper's beta; divergence at t->0 with few steps).
+            denom = time * (1.0 - time)
+            gw = jnp.where(
+                denom > 1e-6,
+                (time**2 + (1.0 - time) ** 2) / jnp.maximum(denom, 1e-6),
+                max_guidance_weight,
+            )
+            gw = jnp.minimum(gw, max_guidance_weight)
+
+            # v decreases -> x_1 increases (x_1 = x_t - t*v), so subtract to move
+            # x_1 toward the target where err = (target - x_1) > 0.
+            v_guided = v_t - gw * correction
+            return x_t + dt * v_guided, time + dt
+
+        def cond(carry):
+            _, time = carry
+            return time >= -dt / 2
+
+        x_0, _ = jax.lax.while_loop(cond, step, (noise, 1.0))
+        return x_0

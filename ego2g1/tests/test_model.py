@@ -205,3 +205,130 @@ def test_rtc_config_validation():
         _ego(rtc_training=True, rtc_d_max=_KW["action_horizon"])
     with pytest.raises(NotImplementedError):
         _ego(num_flow_samples=2)
+
+
+# --- inference-time RTC (sample_actions_guided) ------------------------------
+# Note these all use a PLAIN config (rtc_training=False): guided RTC exists
+# precisely for checkpoints that were never trained for RTC.
+
+
+def _guided(m, cfg, prefix, weights, *, noise, use_vjp=True, beta=10.0, steps=4, seed=9):
+    return np.asarray(
+        m.sample_actions_guided(
+            jax.random.key(seed), cfg.fake_obs(2), prefix, jnp.asarray(weights),
+            num_steps=steps, max_guidance_weight=beta, use_vjp=use_vjp, noise=noise,
+        )
+    )
+
+
+def test_guided_zero_weights_matches_stock_sampling():
+    """The reduction property: no guidance => plain sampling, exactly.
+
+    If this drifts, every chunk is being perturbed even where we asked for no
+    constraint.
+    """
+    cfg = _ego()  # rtc_training=False
+    m = cfg.create(jax.random.key(0))
+    noise = jax.random.normal(jax.random.key(8), (2, cfg.action_horizon, cfg.action_dim))
+    stock = np.asarray(m.sample_actions(jax.random.key(9), cfg.fake_obs(2), num_steps=4, noise=noise))
+
+    prefix = jax.random.normal(jax.random.key(10), (2, cfg.action_horizon, cfg.action_dim))
+    guided = _guided(m, cfg, prefix, np.zeros(cfg.action_horizon, np.float32), noise=noise)
+    np.testing.assert_allclose(stock, guided, rtol=1e-5, atol=1e-6)
+
+
+def test_guided_pulls_weighted_slots_toward_the_prefix():
+    """Guidance must actually move the constrained slots toward the target."""
+    cfg = _ego()
+    m = cfg.create(jax.random.key(0))
+    noise = jax.random.normal(jax.random.key(8), (2, cfg.action_horizon, cfg.action_dim))
+    prefix = jax.random.normal(jax.random.key(10), (2, cfg.action_horizon, cfg.action_dim))
+
+    d = 3
+    w = np.zeros(cfg.action_horizon, np.float32)
+    w[:d] = 1.0
+
+    free = _guided(m, cfg, prefix, np.zeros_like(w), noise=noise)
+    pulled = _guided(m, cfg, prefix, w, noise=noise)
+    tgt = np.asarray(prefix)
+
+    err_free = np.abs(free[:, :d] - tgt[:, :d]).mean()
+    err_pulled = np.abs(pulled[:, :d] - tgt[:, :d]).mean()
+    assert err_pulled < err_free, (err_pulled, err_free)
+
+
+def test_guided_leaves_unweighted_slots_free():
+    """Slots past the overlap must not be dragged toward a target we never set."""
+    cfg = _ego()
+    m = cfg.create(jax.random.key(0))
+    noise = jax.random.normal(jax.random.key(8), (2, cfg.action_horizon, cfg.action_dim))
+    prefix = jax.random.normal(jax.random.key(10), (2, cfg.action_horizon, cfg.action_dim))
+
+    d = 3
+    w = np.zeros(cfg.action_horizon, np.float32)
+    w[:d] = 1.0
+
+    free = _guided(m, cfg, prefix, np.zeros_like(w), noise=noise)
+    pulled = _guided(m, cfg, prefix, w, noise=noise)
+
+    # the guided slots moved...
+    assert not np.allclose(pulled[:, :d], free[:, :d], atol=1e-4)
+    # ...and the tail is still generated (guidance is local, but the chunk is
+    # jointly denoised, so only assert it did not collapse onto the prefix)
+    assert not np.allclose(pulled[:, d:], np.asarray(prefix)[:, d:], atol=1e-3)
+
+
+def test_guided_vjp_differs_from_identity_jacobian():
+    """Guards the LeRobot bug from silently reappearing here.
+
+    unitree-deploy's vendored RTC calls x_t.requires_grad_(True) AFTER computing
+    v_t, so its VJP collapses to the identity and no backprop through the model
+    happens at all. Our use_vjp=True must genuinely differentiate the denoiser —
+    if these two agree, it doesn't.
+    """
+    cfg = _ego()
+    m = cfg.create(jax.random.key(0))
+    noise = jax.random.normal(jax.random.key(8), (2, cfg.action_horizon, cfg.action_dim))
+    prefix = jax.random.normal(jax.random.key(10), (2, cfg.action_horizon, cfg.action_dim))
+
+    w = np.zeros(cfg.action_horizon, np.float32)
+    w[:4] = 1.0
+
+    with_vjp = _guided(m, cfg, prefix, w, noise=noise, use_vjp=True)
+    identity = _guided(m, cfg, prefix, w, noise=noise, use_vjp=False)
+    assert not np.allclose(with_vjp, identity, atol=1e-5)
+
+
+def test_guided_zero_beta_is_unguided():
+    """max_guidance_weight=0 clamps the correction away entirely."""
+    cfg = _ego()
+    m = cfg.create(jax.random.key(0))
+    noise = jax.random.normal(jax.random.key(8), (2, cfg.action_horizon, cfg.action_dim))
+    prefix = jax.random.normal(jax.random.key(10), (2, cfg.action_horizon, cfg.action_dim))
+    stock = np.asarray(m.sample_actions(jax.random.key(9), cfg.fake_obs(2), num_steps=4, noise=noise))
+
+    w = np.ones(cfg.action_horizon, np.float32)
+    out = _guided(m, cfg, prefix, w, noise=noise, beta=0.0)
+    np.testing.assert_allclose(stock, out, rtol=1e-5, atol=1e-6)
+
+
+def test_guided_ignores_the_untrained_padding_dims():
+    """F9. The guidance error must be masked to action_dim_actual. Perturbing the
+    prefix's PADDING dims (which the model was never trained on) must not change the
+    guided output on the REAL dims — otherwise J^T smears meaningless residual back
+    across everything."""
+    cfg = _ego(action_dim_actual=4)   # action_dim=6, so dims 4:6 are padding
+    m = cfg.create(jax.random.key(0))
+    noise = jax.random.normal(jax.random.key(8), (2, cfg.action_horizon, cfg.action_dim))
+    prefix = jax.random.normal(jax.random.key(10), (2, cfg.action_horizon, cfg.action_dim))
+
+    w = np.zeros(cfg.action_horizon, np.float32)
+    w[:4] = 1.0
+
+    base = _guided(m, cfg, prefix, w, noise=noise)
+    # scribble on the padding dims only
+    perturbed = np.asarray(prefix).copy()
+    perturbed[:, :, 4:] += 5.0
+    other = _guided(m, cfg, jnp.asarray(perturbed), w, noise=noise)
+
+    np.testing.assert_allclose(base[:, :, :4], other[:, :, :4], rtol=1e-5, atol=1e-6)
