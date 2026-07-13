@@ -1,0 +1,62 @@
+# eval_replay — teacher-forced checkpoint replay
+
+Watch a checkpoint behave on a held-out episode: two G1s side by side —
+**ground truth** (recorded motion) and the **evaluated checkpoint** (policy
+rollout) — beside the **real egocentric video**, all on one scrubbable timeline.
+
+**Loop = open-loop teacher-forced.** Each query feeds the policy the *real*
+recorded image + state; it predicts 50 actions; the first K (default 25) are
+executed on the eval robot, then the next query re-reads the real observation —
+re-anchoring the eval robot to ground truth every K steps (a visible "snap").
+This is in-distribution and needs no rendered observation; it shows local
+per-waypoint accuracy, not compounding drift.
+
+Two phases, because the PPU box is headless:
+
+## Phase 1 — rollout (on the box, needs jax + checkpoint + dataset)
+
+```bash
+python -m ego2g1.eval_replay.rollout \
+    --checkpoint checkpoints/ego2g1_pi05/run1/10000 \
+    --source-episode put_bottle_in_box/episode_10 \
+    --dataset-root /path/to/put_bottle_in_box \
+    --stride 25 --num-steps 10 --out eval_rollout.npz
+```
+
+Runs the exact deployment stack (`create_policy` → `infer` → `sample_actions`
+Euler integration) and dumps a tiny `eval_rollout.npz` (raw actions + anchor
+states per query). No mujoco/mink/display. Needs a video decoder:
+`pip install --user opencv-python` (additive `--user`; dry-run first).
+
+`scp eval_rollout.npz` to the display machine.
+
+## Phase 2 — viewer (on a machine with a display: mujoco/mink + data_extraction)
+
+```bash
+python -m ego2g1.eval_replay.viewer \
+    --rollout eval_rollout.npz \
+    --dataset-root /path/to/put_bottle_in_box \
+    --data-extraction-path /path/to/ego-pi-replication \
+    --hands            # attach revo2 dexterous hands (omit for arms + grip bars)
+```
+
+Reconstructs the eval trajectory (compose deltas with the anchor → mink IK),
+reads GT `arm_qpos`/hand/video locally, renders both robots (offscreen) + video,
+and opens a live OpenCV window with a **frame trackbar** (scrub all three in
+sync). Add `--mp4 --out replay.mp4` to write a video instead (auto-selected when
+headless). `--data-extraction-path` must contain the `data_extraction` package
+(sim/hand/`assets/unitree_g1`/`assets/revo2`) — clone the outer repo or copy that
+subtree.
+
+## Transform sanity (no checkpoint needed)
+
+```bash
+python -m ego2g1.eval_replay.rollout --synthetic-gt \
+    --source-episode put_bottle_in_box/episode_10 \
+    --dataset-root /path/to/put_bottle_in_box --out gt.npz
+python -m ego2g1.eval_replay.viewer --rollout gt.npz --mp4 ...
+```
+
+`--synthetic-gt` writes a dump whose composed targets exactly reproduce the
+recorded trajectory, so the eval robot should **overlay** the GT robot. Verified:
+IK reconstruction reproduces recorded arm joints to ~0.3° mean / 4° max.
