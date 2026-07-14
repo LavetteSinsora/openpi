@@ -171,7 +171,17 @@ def run_interactive(ep, eval_arm, eval_hl, eval_hr, query_ticks, mount, fps=30):
             state["t"] = max(state["t"] - 1, 0); state["paused"] = True
 
     print("interactive: drag to orbit · SPACE play/pause · <-/-> step · GT is left, eval is right")
-    with mujoco.viewer.launch_passive(scene.model, scene.data, key_callback=key_cb) as v:
+    try:
+        cm = mujoco.viewer.launch_passive(scene.model, scene.data, key_callback=key_cb)
+    except RuntimeError as e:
+        if "mjpython" in str(e):
+            raise SystemExit(
+                "macOS needs mjpython for the interactive viewer. Re-run with:\n"
+                "  PYTHONPATH=. ../../.venv/bin/mjpython -m ego2g1.eval_replay.viewer <same args>\n"
+                "(or drop --interactive to use the OpenCV window / --mp4)."
+            ) from e
+        raise
+    with cm as v:
         v.cam.distance, v.cam.azimuth, v.cam.elevation = 2.4, 150, -12
         v.cam.lookat[:] = [0.0, -0.45, 1.0]
         while v.is_running():
