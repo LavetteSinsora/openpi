@@ -104,7 +104,8 @@ def _timeline_base(mse, query_ticks, width, height=150):
     # MSE curve
     pts = np.array([[x(t), y(mse[t])] for t in range(T)], np.int32)
     cv2.polylines(img, [pts], False, (90, 170, 240), 2, cv2.LINE_AA)
-    return img, x
+    inv = lambda px: int(np.clip(round((px - left) / max(pw, 1) * (T - 1)), 0, T - 1))
+    return img, x, inv
 
 
 def _timeline_frame(base, xfn, t, height):
@@ -256,7 +257,7 @@ def main():
         comps.append(compose_frame(gt_r.render(), eval_r.render(), video[t], t, step,
                                    (ep.hand_left[t], ep.hand_right[t]), (eval_hl[t], eval_hr[t]), h=args.height))
     comp_w = comps[0].shape[1]
-    tl_base, xfn = _timeline_base(mse, query_ticks, comp_w)
+    tl_base, xfn, inv_xfn = _timeline_base(mse, query_ticks, comp_w)
     tl_h = tl_base.shape[0]
     frames = np.stack([
         cv2.cvtColor(np.concatenate([comp, _timeline_frame(tl_base, xfn, t, tl_h)], axis=0), cv2.COLOR_RGB2BGR)
@@ -279,23 +280,39 @@ def main():
     state = {"t": 0}
     cv2.createTrackbar("frame", win, 0, T - 1, lambda v: state.update(t=v))
     fps = 30
-    print("controls: SPACE play/pause · a/d (or ,/.) step · scrub the trackbar · q/ESC quit")
-    playing = False
+    comp_h = H - tl_h  # timeline strip occupies the bottom tl_h rows
+
+    def on_mouse(event, x, y, flags, _param):
+        dragging = event == cv2.EVENT_LBUTTONDOWN or (
+            event == cv2.EVENT_MOUSEMOVE and flags & cv2.EVENT_FLAG_LBUTTON)
+        if dragging and y >= comp_h:  # drag anywhere on the timeline strip -> scrub live
+            state["t"] = inv_xfn(x)
+            state["playing"] = False
+            cv2.setTrackbarPos("frame", win, state["t"])
+
+    cv2.setMouseCallback(win, on_mouse)
+    state["playing"] = False
+    print("controls: SPACE play/pause · a/d (or ,/.) step · DRAG ON THE TIMELINE to scrub · q/ESC quit")
     while True:
+        # poll the trackbar too (its callback only fires on mouse-up on macOS)
+        pos = cv2.getTrackbarPos("frame", win)
+        if not state["playing"] and pos != state["t"]:
+            state["t"] = pos
+        playing = state["playing"]
         t = state["t"]
         cv2.imshow(win, frames[t])
-        key = cv2.waitKey(max(1, int(1000 / fps)) if playing else 20) & 0xFF
+        key = cv2.waitKey(max(1, int(1000 / fps)) if playing else 15) & 0xFF
         if key in (ord("q"), 27):
             break
         if key == 32:  # SPACE
-            playing = not playing
+            state["playing"] = not state["playing"]
         elif key in (ord("d"), ord("."), 83):  # step forward
-            state["t"] = min(t + 1, T - 1)
-            cv2.setTrackbarPos("frame", win, state["t"]); playing = False
+            state["t"] = min(t + 1, T - 1); state["playing"] = False
+            cv2.setTrackbarPos("frame", win, state["t"])
         elif key in (ord("a"), ord(","), 81):  # step back
-            state["t"] = max(t - 1, 0)
-            cv2.setTrackbarPos("frame", win, state["t"]); playing = False
-        if playing:
+            state["t"] = max(t - 1, 0); state["playing"] = False
+            cv2.setTrackbarPos("frame", win, state["t"])
+        if state["playing"]:
             nxt = 0 if t >= T - 1 else t + 1  # loop at the end
             state["t"] = nxt
             cv2.setTrackbarPos("frame", win, nxt)

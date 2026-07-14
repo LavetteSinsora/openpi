@@ -112,6 +112,14 @@ def _build_combined_model(g1, hand_constants, hand_mount, mount_quats):
     return _build_combined_spec(g1, hand_constants, hand_mount, mount_quats).compile()
 
 
+# Empirical correction applied on top of the calibrated mount_R: the hand needs a
+# further 90deg CLOCKWISE spin about its own (finger) axis to sit like the real hand
+# (palms inward / thumbs up, the bottle-grasp approach) rather than palm-flat-down.
+# Likely a convention offset between the fk_tables' robot_palm frame (which mount_R
+# is derived through) and the revo2 MJCF base_link frame. Override with --hand-mount-rpy.
+DEFAULT_HAND_RPY = (0.0, 0.0, -np.pi / 2)
+
+
 def _build_combined_spec(g1, hand_constants, hand_mount, mount_quats):
     """The uncompiled spec (rubber_hand removed, revo2 hands attached at the
     calibrated flange->Revo2 rotation) — two of these merge into the two-robot
@@ -125,7 +133,8 @@ def _build_combined_spec(g1, hand_constants, hand_mount, mount_quats):
             spec.delete(gm)
 
     xyz = np.zeros(3) if hand_mount is None else np.asarray(hand_mount.get("xyz", np.zeros(3)), float)
-    rpy = np.zeros(3) if hand_mount is None else np.asarray(hand_mount.get("rpy", np.zeros(3)), float)
+    rpy = np.asarray(DEFAULT_HAND_RPY if (hand_mount is None or hand_mount.get("rpy") is None)
+                     else hand_mount["rpy"], float)
     extra = _rpy_to_wxyz(rpy)
     for side in ("left", "right"):
         hand_spec = mujoco.MjSpec.from_file(str(hand_constants.MJCF_PATH[side]))
