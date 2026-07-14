@@ -113,11 +113,11 @@ def _build_combined_model(g1, hand_constants, hand_mount, mount_quats):
 
 
 # Empirical correction applied on top of the calibrated mount_R: the hand needs a
-# further 90deg CLOCKWISE spin about its own (finger) axis to sit like the real hand
-# (palms inward / thumbs up, the bottle-grasp approach) rather than palm-flat-down.
+# further 90deg COUNTER-CLOCKWISE spin about its own (finger) axis to sit like the real
+# hand (i.e. 180deg from the clockwise attempt, which turned the wrong way).
 # Likely a convention offset between the fk_tables' robot_palm frame (which mount_R
 # is derived through) and the revo2 MJCF base_link frame. Override with --hand-mount-rpy.
-DEFAULT_HAND_RPY = (0.0, 0.0, -np.pi / 2)
+DEFAULT_HAND_RPY = (0.0, 0.0, np.pi / 2)
 
 
 def _build_combined_spec(g1, hand_constants, hand_mount, mount_quats):
