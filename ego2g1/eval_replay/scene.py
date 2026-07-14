@@ -26,7 +26,7 @@ class G1Renderer:
         if with_hands:
             model = _build_combined_model(self._g1, self._hc, hand_mount)
             self.backend = self._g1.G1Backend(model=model)
-            self._hand = _HandDrive(self.backend, self._hc)
+            self._hand = _HandDrive(self.backend.model, self.backend.data, self._hc)
         else:
             self.backend = self._g1.G1Backend()
             self._hand = None
@@ -73,12 +73,24 @@ class EvalIK:
 # --- combined G1 + revo2 hands (mjSpec attach) --------------------------------
 
 def _build_combined_model(g1, hand_constants, hand_mount):
-    """Attach the revo2 hand MJCFs to the G1 flange sites, returning one
-    compiled MjModel. hand_mount = optional dict(xyz=..., rpy=...) applied to
-    both hands' base frame relative to the flange site (default: flange-aligned)."""
+    """G1 with the built-in `rubber_hand` mesh REMOVED and the revo2 hands
+    attached at the flange sites, compiled to one MjModel. hand_mount =
+    optional dict(xyz=..., rpy=...) applied to both hands' base relative to the
+    flange (default identity — the flange site sits at the wrist_yaw_link origin
+    and the revo2 base is already flange-aligned there)."""
+    return _build_combined_spec(g1, hand_constants, hand_mount).compile()
+
+
+def _build_combined_spec(g1, hand_constants, hand_mount):
+    """The uncompiled spec (rubber_hand removed, revo2 hands attached) — so two
+    of them can be merged into one two-robot scene for the interactive viewer."""
     import mujoco
 
     spec = mujoco.MjSpec.from_file(g1.MODEL_XML)
+    for gm in list(spec.geoms):
+        if "rubber_hand" in (gm.name or "") or "rubber_hand" in (getattr(gm, "meshname", "") or ""):
+            spec.delete(gm)
+
     xyz = np.zeros(3) if hand_mount is None else np.asarray(hand_mount.get("xyz", np.zeros(3)), float)
     rpy = np.zeros(3) if hand_mount is None else np.asarray(hand_mount.get("rpy", np.zeros(3)), float)
     quat = _rpy_to_wxyz(rpy)
@@ -86,12 +98,51 @@ def _build_combined_model(g1, hand_constants, hand_mount):
         hand_spec = mujoco.MjSpec.from_file(str(hand_constants.MJCF_PATH[side]))
         root = hand_spec.worldbody.bodies[0]  # {side}_base_link
         site = spec.site(g1.EE_SITES[side])
-        # attach the hand's root body under a new frame at the flange site
         frame = site.parent.add_frame()
         frame.pos = np.asarray(site.pos, float) + xyz
         frame.quat = _quat_mul(np.asarray(site.quat, float), quat)
         frame.attach_body(root, f"{side}_hand_", "")
-    return spec.compile()
+    return spec
+
+
+class _RobotHandle:
+    """qpos addressing + kinematic hand drive for one robot in a (possibly
+    multi-robot) model, identified by a joint-name `prefix` ("" or "eval_")."""
+
+    def __init__(self, model, data, hand_constants, g1, prefix=""):
+        self.model, self.data = model, data
+        adr = lambda n: model.joint(prefix + n).qposadr[0]
+        self.arm_adr = np.array([adr(n) for s in ("left", "right") for n in g1.ARM_JOINTS[s]])
+        self._hand = _HandDrive(model, data, hand_constants, prefix=prefix)
+
+    def set(self, arm_qpos14, hand_left6, hand_right6):
+        self.data.qpos[self.arm_adr] = arm_qpos14
+        self._hand.set(hand_left6, hand_right6)
+
+
+class TwoRobotScene:
+    """GT + eval G1 (with hands) in ONE model, offset in y, for the interactive
+    orbitable viewer. Display-only — IK reconstruction happens elsewhere."""
+
+    def __init__(self, hand_mount=None, sep=0.9):
+        import mujoco
+
+        self._g1, self._frames, self._hc = _import_sim()
+        base = _build_combined_spec(self._g1, self._hc, hand_mount)
+        second = _build_combined_spec(self._g1, self._hc, hand_mount)
+        frame = base.worldbody.add_frame()
+        frame.pos = [0.0, -sep, 0.0]
+        frame.attach_body(second.body("pelvis"), "eval_", "")
+        self.model = base.compile()
+        self.data = mujoco.MjData(self.model)
+        self.gt = _RobotHandle(self.model, self.data, self._hc, self._g1, prefix="")
+        self.eval = _RobotHandle(self.model, self.data, self._hc, self._g1, prefix="eval_")
+
+    def set_frame(self, gt_arm, gt_hl, gt_hr, ev_arm, ev_hl, ev_hr):
+        import mujoco
+        self.gt.set(gt_arm, gt_hl, gt_hr)
+        self.eval.set(ev_arm, ev_hl, ev_hr)
+        mujoco.mj_forward(self.model, self.data)
 
 
 class _HandDrive:
@@ -103,9 +154,9 @@ class _HandDrive:
     _COUPLE = {"thumb": (1.0, "thumb_flex"), "index": (1.155, "index"),
                "middle": (1.155, "middle"), "ring": (1.155, "ring"), "pinky": (1.155, "pinky")}
 
-    def __init__(self, backend, hand_constants):
-        self.model = backend.model
-        self.data = backend.data
+    def __init__(self, model, data, hand_constants, prefix=""):
+        self.model = model
+        self.data = data
         MO = hand_constants.MOTOR_ORDER
         self.sides = {}
         for side in ("left", "right"):
@@ -113,13 +164,13 @@ class _HandDrive:
             qadr = np.empty(6, int)
             cmax = np.empty(6)
             for m, motor in enumerate(MO):
-                jname = f"{side}_hand_{act_name[motor]}"
+                jname = f"{prefix}{side}_hand_{act_name[motor]}"
                 qadr[m] = self.model.joint(jname).qposadr[0]
                 cmax[m] = _joint_ctrl_max(self.model, jname)
             prox_of = dict(zip(MO, qadr))
             couple = []  # (distal_qadr, ratio, source_prox_qadr)
             for finger, (ratio, motor) in self._COUPLE.items():
-                dj = self.model.joint(f"{side}_hand_{side}_{finger}_distal_joint")
+                dj = self.model.joint(f"{prefix}{side}_hand_{side}_{finger}_distal_joint")
                 couple.append((dj.qposadr[0], ratio, prox_of[motor]))
             self.sides[side] = (qadr, cmax, couple)
 

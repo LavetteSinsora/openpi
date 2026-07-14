@@ -54,6 +54,67 @@ def reconstruct_eval(dump, ep, ik_renderer):
     return eval_arm, eval_hand["left"], eval_hand["right"]
 
 
+def eef_proprioception_mse(ep, eval_arm, renderer):
+    """Per-frame MSE between the eval robot's EEF proprioception and GT's, over
+    both hands' flange vec9 (18 dims). Eval EEF is FK'd from eval_arm and
+    expressed in the pelvis frame (same convention as the recorded `state` EEF).
+    Expected shape: ~0 at each teacher-forcing re-sync, growing between."""
+    import mujoco
+
+    from ego2g1.chunk_math import se3_to_vec9
+
+    be = renderer.backend
+    mse = np.zeros(ep.n_frames)
+    for t in range(ep.n_frames):
+        be.data.qpos[renderer.arm_adr] = eval_arm[t]
+        mujoco.mj_forward(be.model, be.data)
+        err = 0.0
+        for side in ("left", "right"):
+            eval_vec9 = se3_to_vec9(be.world_to_base(be.flange_pose(side)))
+            err += float(np.mean((eval_vec9 - ep.state[t][dio.EEF[side]]) ** 2))
+        mse[t] = err / 2.0
+    return mse
+
+
+def _timeline_base(mse, query_ticks, width, height=150):
+    """Static timeline: MSE curve + green teacher-forcing markers + axes."""
+    import cv2
+
+    img = np.full((height, width, 3), 22, np.uint8)
+    left, right, top, bot = 66, 12, 26, 22
+    pw, ph = width - left - right, height - top - bot
+    T = len(mse)
+    vmax = max(float(mse.max()), 1e-9)
+    x = lambda t: int(left + (t / max(T - 1, 1)) * pw)
+    y = lambda v: int(top + ph * (1.0 - v / vmax))
+
+    cv2.putText(img, "EEF proprioception MSE  (eval vs ground truth)", (left, 16),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.46, (220, 220, 220), 1, cv2.LINE_AA)
+    cv2.putText(img, "teacher-forcing re-sync", (width - 230, 16),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.4, (90, 210, 120), 1, cv2.LINE_AA)
+    # axes
+    cv2.line(img, (left, top), (left, top + ph), (90, 90, 90), 1)
+    cv2.line(img, (left, top + ph), (left + pw, top + ph), (90, 90, 90), 1)
+    cv2.putText(img, f"{vmax:.2g}", (4, top + 6), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (150, 150, 150), 1, cv2.LINE_AA)
+    cv2.putText(img, "0", (4, top + ph), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (150, 150, 150), 1, cv2.LINE_AA)
+    # teacher-forcing markers (green verticals where eval is restored to GT)
+    for qt in query_ticks:
+        if 0 <= qt < T:
+            cv2.line(img, (x(qt), top), (x(qt), top + ph), (60, 120, 70), 1)
+    # MSE curve
+    pts = np.array([[x(t), y(mse[t])] for t in range(T)], np.int32)
+    cv2.polylines(img, [pts], False, (90, 170, 240), 2, cv2.LINE_AA)
+    return img, x
+
+
+def _timeline_frame(base, xfn, t, height):
+    import cv2
+    img = base.copy()
+    cx = xfn(t)
+    cv2.line(img, (cx, 24), (cx, height - 22), (255, 255, 255), 1)
+    return img
+
+
 # --- compositing --------------------------------------------------------------
 
 def _resize_h(img, h):
@@ -87,6 +148,42 @@ def compose_frame(img_gt, img_eval, img_video, t, step_label, gt_hands, eval_han
     return np.concatenate([gt, strip, ev, strip, vid], axis=1)
 
 
+def run_interactive(ep, eval_arm, eval_hl, eval_hr, query_ticks, mount, fps=30):
+    """Orbitable mujoco viewer: GT (left) + eval (right) in one scene. Drag to
+    rotate/zoom/pan; SPACE play/pause, left/right arrow step. Loops."""
+    import time
+
+    import mujoco
+    import mujoco.viewer
+
+    from ego2g1.eval_replay.scene import TwoRobotScene
+
+    scene = TwoRobotScene(hand_mount=mount)
+    T = ep.n_frames
+    state = {"t": 0, "paused": False}
+
+    def key_cb(keycode):
+        if keycode == 32:  # SPACE
+            state["paused"] = not state["paused"]
+        elif keycode == 262:  # right arrow
+            state["t"] = min(state["t"] + 1, T - 1); state["paused"] = True
+        elif keycode == 263:  # left arrow
+            state["t"] = max(state["t"] - 1, 0); state["paused"] = True
+
+    print("interactive: drag to orbit · SPACE play/pause · <-/-> step · GT is left, eval is right")
+    with mujoco.viewer.launch_passive(scene.model, scene.data, key_callback=key_cb) as v:
+        v.cam.distance, v.cam.azimuth, v.cam.elevation = 2.4, 150, -12
+        v.cam.lookat[:] = [0.0, -0.45, 1.0]
+        while v.is_running():
+            t = state["t"]
+            scene.set_frame(ep.arm_qpos[t], ep.hand_left[t], ep.hand_right[t],
+                            eval_arm[t], eval_hl[t], eval_hr[t])
+            v.sync()
+            time.sleep(1.0 / fps)
+            if not state["paused"]:
+                state["t"] = 0 if t >= T - 1 else t + 1
+
+
 # --- main ---------------------------------------------------------------------
 
 def main():
@@ -100,6 +197,8 @@ def main():
     ap.add_argument("--hand-mount-rpy", type=float, nargs=3, default=None)
     ap.add_argument("--out", default="eval_replay.mp4", help="mp4 written when headless / --mp4")
     ap.add_argument("--mp4", action="store_true", help="force mp4 output (no live window)")
+    ap.add_argument("--interactive", action="store_true",
+                    help="orbitable mujoco 3D viewer with both robots (drag to rotate); needs a display")
     ap.add_argument("--height", type=int, default=480)
     args = ap.parse_args()
 
@@ -116,29 +215,39 @@ def main():
                          "— dataset copy mismatch")
     print(f"episode {episode_index} ({ep.source_episode}) — {ep.n_frames} frames, mode={str(dump['mode'])}")
 
+    mount = {"xyz": args.hand_mount_xyz or [0, 0, 0], "rpy": args.hand_mount_rpy or [0, 0, 0]} \
+        if (args.hand_mount_xyz or args.hand_mount_rpy) else None
+    query_ticks = dump["query_ticks"].tolist()
+
+    # IK reconstruction of the eval trajectory (arms-only backend is enough).
+    ik_r = G1Renderer(with_hands=False)
+    print("reconstructing eval trajectory (IK)...")
+    eval_arm, eval_hl, eval_hr = reconstruct_eval(dump, ep, ik_r)
+    mse = eef_proprioception_mse(ep, eval_arm, ik_r)
+
+    if args.interactive:
+        run_interactive(ep, eval_arm, eval_hl, eval_hr, query_ticks, mount)
+        return
+
     video = dio.read_video_frames(ep.video_path, ep.n_frames, ep.fps)
     T = min(ep.n_frames, len(video))
-
-    mount = None
-    if args.hands:
-        mount = {"xyz": args.hand_mount_xyz or [0, 0, 0], "rpy": args.hand_mount_rpy or [0, 0, 0]}
     gt_r = G1Renderer(with_hands=args.hands, hand_mount=mount)
     eval_r = G1Renderer(with_hands=args.hands, hand_mount=mount)
-
-    print("reconstructing eval trajectory (IK)...")
-    eval_arm, eval_hl, eval_hr = reconstruct_eval(dump, ep, eval_r)
-
-    query_ticks = dump["query_ticks"].tolist()
     print("rendering frames...")
-    frames = []
+    comps = []
     for t in range(T):
         gt_r.set_pose(ep.arm_qpos[t], ep.hand_left[t], ep.hand_right[t])
         eval_r.set_pose(eval_arm[t], eval_hl[t], eval_hr[t])
         step = "(anchor=GT)" if t in query_ticks else "(predicted)"
-        comp = compose_frame(gt_r.render(), eval_r.render(), video[t], t, step,
-                             (ep.hand_left[t], ep.hand_right[t]), (eval_hl[t], eval_hr[t]), h=args.height)
-        frames.append(cv2.cvtColor(comp, cv2.COLOR_RGB2BGR))
-    frames = np.stack(frames)
+        comps.append(compose_frame(gt_r.render(), eval_r.render(), video[t], t, step,
+                                   (ep.hand_left[t], ep.hand_right[t]), (eval_hl[t], eval_hr[t]), h=args.height))
+    comp_w = comps[0].shape[1]
+    tl_base, xfn = _timeline_base(mse, query_ticks, comp_w)
+    tl_h = tl_base.shape[0]
+    frames = np.stack([
+        cv2.cvtColor(np.concatenate([comp, _timeline_frame(tl_base, xfn, t, tl_h)], axis=0), cv2.COLOR_RGB2BGR)
+        for t, comp in enumerate(comps)
+    ])
     H, W = frames.shape[1:3]
 
     headless = args.mp4 or (not os.environ.get("DISPLAY") and sys.platform.startswith("linux"))
@@ -155,12 +264,27 @@ def main():
     cv2.namedWindow(win, cv2.WINDOW_NORMAL)
     state = {"t": 0}
     cv2.createTrackbar("frame", win, 0, T - 1, lambda v: state.update(t=v))
-    print("scrub the 'frame' trackbar; q or ESC to quit")
+    fps = 30
+    print("controls: SPACE play/pause · a/d (or ,/.) step · scrub the trackbar · q/ESC quit")
+    playing = False
     while True:
-        cv2.imshow(win, frames[state["t"]])
-        key = cv2.waitKey(30) & 0xFF
+        t = state["t"]
+        cv2.imshow(win, frames[t])
+        key = cv2.waitKey(max(1, int(1000 / fps)) if playing else 20) & 0xFF
         if key in (ord("q"), 27):
             break
+        if key == 32:  # SPACE
+            playing = not playing
+        elif key in (ord("d"), ord("."), 83):  # step forward
+            state["t"] = min(t + 1, T - 1)
+            cv2.setTrackbarPos("frame", win, state["t"]); playing = False
+        elif key in (ord("a"), ord(","), 81):  # step back
+            state["t"] = max(t - 1, 0)
+            cv2.setTrackbarPos("frame", win, state["t"]); playing = False
+        if playing:
+            nxt = 0 if t >= T - 1 else t + 1  # loop at the end
+            state["t"] = nxt
+            cv2.setTrackbarPos("frame", win, nxt)
         if cv2.getWindowProperty(win, cv2.WND_PROP_VISIBLE) < 1:
             break
     cv2.destroyAllWindows()

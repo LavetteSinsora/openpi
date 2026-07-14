@@ -42,11 +42,24 @@ python -m ego2g1.eval_replay.viewer \
 
 Reconstructs the eval trajectory (compose deltas with the anchor → mink IK),
 reads GT `arm_qpos`/hand/video locally, renders both robots (offscreen) + video,
-and opens a live OpenCV window with a **frame trackbar** (scrub all three in
-sync). Add `--mp4 --out replay.mp4` to write a video instead (auto-selected when
-headless). `--data-extraction-path` must contain the `data_extraction` package
-(sim/hand/`assets/unitree_g1`/`assets/revo2`) — clone the outer repo or copy that
-subtree.
+and opens a live OpenCV window. Below the three panels is a **timeline** plotting
+the per-frame EEF proprioception MSE (eval vs GT), with green markers at the
+teacher-forcing re-syncs — expect a sawtooth (grows within each K-window, drops
+to ~0 at each re-sync). `--data-extraction-path` must contain the `data_extraction`
+package (sim/hand/`assets/unitree_g1`/`assets/revo2`) — clone the outer repo or
+copy that subtree.
+
+Controls (live window): **SPACE** play/pause · **a/d** or **,/.** step · drag the
+**frame** trackbar to scrub · **q/ESC** quit.
+
+Flags:
+- `--hands` attach the revo2 dexterous hands (the G1's own `rubber_hand` mesh is
+  removed so they don't double up); omit for arms + grip-bar overlay only.
+- `--interactive` open an **orbitable mujoco 3D viewer** with both robots in one
+  scene (GT left, eval right) — drag to rotate/zoom/pan, SPACE play/pause,
+  left/right arrow step. No video/timeline panel in this mode. Needs a display.
+- `--mp4 --out replay.mp4` write a composited video instead of a window
+  (auto-selected when headless).
 
 ## Transform sanity (no checkpoint needed)
 

@@ -108,7 +108,8 @@ def main():
           f"K={args.stride} -> {len(query_ticks)} queries")
 
     horizon, action_dim = 50, 32
-    provenance = {"extraction_config_hash": None, "ego2g1_config_hash": None}
+    # empty strings (not None) so the .npz stays allow_pickle=False loadable
+    provenance = {"extraction_config_hash": "", "ego2g1_config_hash": ""}
     if args.synthetic_gt:
         actions = gt_actions(ep, query_ticks, horizon)
         mode = "synthetic_gt"
@@ -120,8 +121,8 @@ def main():
         stamp = _stamp.check_supported(_policy.resolve_run_dir(args.checkpoint))
         cfg = _policy.config_from_stamp(stamp)
         horizon, action_dim = cfg.action_horizon, cfg.action_dim
-        provenance = {"extraction_config_hash": stamp.get("extraction_config_hash"),
-                      "ego2g1_config_hash": stamp.get("ego2g1_config_hash")}
+        provenance = {"extraction_config_hash": stamp.get("extraction_config_hash") or "",
+                      "ego2g1_config_hash": stamp.get("ego2g1_config_hash") or ""}
         actions = _policy_actions(ep, query_ticks, horizon, action_dim, args)
         mode = "policy"
 
