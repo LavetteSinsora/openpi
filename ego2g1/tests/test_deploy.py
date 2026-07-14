@@ -481,3 +481,38 @@ def test_serve_record_reads_metadata_before_wrapping():
     text = src.read_text()
     assert "metadata=meta" in text
     assert text.index("meta = policy.metadata") < text.index("PolicyRecorder(policy")
+
+
+def test_dataset_camera_matches_head_camera():
+    """Rung 7 swaps the real camera for DatasetCamera, so the stub must implement
+    everything the loop calls on a camera. It did not implement age() — the loop's
+    staleness watchdog — and rung 7 died in the control thread with an AttributeError
+    dressed up as an e-stop. The guard is right; the stub was incomplete."""
+    import inspect
+
+    from ego2g1.deploy.camera import HeadCamera
+    from ego2g1.deploy.dataset_client import DatasetCamera
+
+    real = {n for n, _ in inspect.getmembers(HeadCamera, inspect.isfunction)
+            if not n.startswith("_")}
+    stub = {n for n, _ in inspect.getmembers(DatasetCamera, inspect.isfunction)
+            if not n.startswith("_")}
+    assert real <= stub, f"DatasetCamera is missing {real - stub}"
+
+
+def test_dataset_client_infer_matches_policy_client():
+    """DatasetClient is what rung 7 substitutes for the real client, so its infer()
+    must accept exactly what the loop sends. When the loop learned to send n_prefix
+    and only PolicyClient learned to accept it, rung 7 died in the control thread on
+    its own scaffolding — a TypeError masquerading as an e-stop, on the rung whose
+    whole job is to test the transforms."""
+    import inspect
+
+    from ego2g1.deploy.client import PolicyClient
+    from ego2g1.deploy.dataset_client import DatasetClient
+
+    real = inspect.signature(PolicyClient.infer).parameters
+    stub = inspect.signature(DatasetClient.infer).parameters
+    assert set(real) == set(stub), f"drifted: {set(real) ^ set(stub)}"
+    for name, p in real.items():
+        assert stub[name].kind == p.kind, f"{name}: {stub[name].kind} != {p.kind}"

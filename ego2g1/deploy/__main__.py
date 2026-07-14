@@ -36,6 +36,12 @@ class Args:
     # --- policy server ---
     host: str = "127.0.0.1"
     port: int = 8000
+    # Resize the frame to this (h, w) BEFORE it goes on the wire — 20x less payload,
+    # which is what makes a remote server (ssh -L to the PPU box) viable at all. The
+    # default matches the server's ResizeImages(224, 224), so the server's own resize
+    # becomes a no-op. `--image-resize None` sends the raw head frame instead; any
+    # OTHER value gets letterboxed twice. See deploy/client.py and deploy/README.md.
+    image_resize: tuple[int, int] | None = (224, 224)
 
     # --- robot ---
     network_interface: str | None = None   # None => join the existing DDS domain
@@ -75,7 +81,7 @@ def main(args: Args) -> None:
     )
 
     logging.info("connecting to policy server %s:%d ...", args.host, args.port)
-    client = _client.PolicyClient(args.host, args.port)
+    client = _client.PolicyClient(args.host, args.port, resize=args.image_resize)
 
     logging.info("loading kinematics from %s ...", args.data_extraction_path)
     kin = _kin.Kinematics(

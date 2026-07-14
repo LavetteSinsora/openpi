@@ -11,8 +11,10 @@ different viewpoint fails quietly and looks like a bad policy. Log the exact
 array we send to Rerun and eyeball it against a training frame before believing
 any rollout.
 
-No resize here: the server's ResizeImages(224, 224) does an aspect-preserving pad,
-and doing it twice would letterbox a letterbox.
+No resize here: read() hands back the RAW head frame, which is what check/Rerun
+must see. The resize to the model's 224x224 happens once, at the wire, in
+PolicyClient._prepare_image — see deploy/client.py for why it lives there and why
+224x224 is the only safe value.
 """
 
 import threading

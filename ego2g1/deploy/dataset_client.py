@@ -87,14 +87,22 @@ class DatasetClient:
             return 0
         return min(self.tick + int(self._consumed()), self.ep.n_frames - 1)
 
-    def infer(self, image, state, prompt, *, prev_chunk=None, d: int = 0) -> dict:
+    def infer(self, image, state, prompt, *, prev_chunk=None, d: int = 0,
+              n_prefix: int | None = None) -> dict:
         """`image`, `state` and `prompt` are ignored — that is the point. They are
         what a policy would condition on; the labels are indexed by time instead.
 
-        `prev_chunk` (the RTC prefix) is likewise ignored: the labels are already
-        self-consistent across chunks, so there is nothing to guide. Run the loop
-        in blocking mode; async + RTC has nothing to add here and would only make
-        the tick bookkeeping harder to reason about.
+        `prev_chunk` (the RTC prefix), `d` and `n_prefix` are likewise ignored: the
+        labels are already self-consistent across chunks, so there is nothing to
+        guide. Run the loop in blocking mode; async + RTC has nothing to add here
+        and would only make the tick bookkeeping harder to reason about.
+
+        The signature must nonetheless track PolicyClient.infer EXACTLY, keyword for
+        keyword. This class is what rung 7 substitutes for the real client, so any
+        argument the loop learns to send and this does not accept is a TypeError in
+        the control thread — i.e. rung 7 fails on its own scaffolding rather than on
+        the transforms it exists to test. `n_prefix` was added to the client and not
+        here, and that is precisely how it failed.
         """
         self.tick = self.next_tick()
         actions = gt_actions(self.ep, [self.tick], self.action_horizon)[0]
@@ -139,6 +147,18 @@ class DatasetCamera:
         if self._frames is None:
             return self._blank
         return self._frames[min(self.client.next_tick(), len(self._frames) - 1)]
+
+    def age(self) -> float:
+        """Always 0: a recording cannot go stale.
+
+        The loop trips the watchdog when the camera has not produced a frame for
+        max_camera_age — a policy running on a frozen frame is worse than a stopped
+        robot. That guards a live ZMQ stream from the G1's head. Here the frame is
+        indexed by the tick the client is about to be queried at, so "how old is
+        this frame" has no physical meaning and the check must not fire. Constant by
+        intent, not by omission — the staleness path simply is not what rung 7 tests.
+        """
+        return 0.0
 
     def close(self) -> None:
         self._frames = None

@@ -7,6 +7,7 @@
     python -m ego2g1.deploy.check hand-sweep # 5. one finger at a time    [robot]
     python -m ego2g1.deploy.check replay     # 6. recorded JOINTS, no model   [robot]
     python -m ego2g1.deploy.check replay-actions # 7. recorded ACTIONS, no model [robot]
+    python -m ego2g1.deploy.check latency    # 8. round trip to the server [no robot]
 
 Rungs 2 and 3 need no hardware and no checkpoint, and between them they validate
 joint order, the waist==0 assumption, the flange frame, the pelvis frame, the
@@ -407,6 +408,67 @@ def replay_actions(dataset: str, repo: str | None = None, episode: int | None = 
         print(f"wrote {out}")
 
 
+# --- 8. policy-server latency ------------------------------------------------
+
+def latency(host: str = "127.0.0.1", port: int = 8000, n: int = 20,
+            frame_hw: tuple[int, int] = (480, 640),
+            image_resize: tuple[int, int] | None = (224, 224)) -> None:
+    """Time the round trip to the policy server. No robot, no camera.
+
+    Run it TWICE: once on the server box (127.0.0.1, no tunnel) and once on the
+    robot PC. The server-local number is pure inference; the difference between
+    them is what the network costs. That difference is the entire question behind
+    a split deployment (serve on a remote cluster, deploy on the Mac).
+
+    What the numbers mean: the loop promises the server a delay of `d` ticks and
+    splices the new chunk at slot d. DelayBudget caps d at max_d (20 ticks = 667 ms
+    at 30 Hz). Past that the budget saturates: the loop still plans, but chunks land
+    after the prefix they were guided against, so the RTC seam guarantee is gone and
+    continuity rests on the joint clamp alone. So p95 is the number that matters,
+    not the mean, and 667 ms is a cliff rather than a gradient.
+
+    The first call includes an XLA compile (minutes on a cold server) and is
+    reported separately — never let a policy's first-ever request happen with the
+    robot in the loop.
+    """
+    from ego2g1.deploy import client as _client
+
+    c = _client.PolicyClient(host, port, resize=image_resize)
+    frame = np.random.randint(0, 255, (*frame_hw, 3), dtype=np.uint8)
+    state = np.zeros(c.action_dim, dtype=np.float32)
+
+    print(f"\nserver {host}:{port} | horizon {c.action_horizon} dim {c.action_dim} "
+          f"fps {c.fps}")
+    sent = c._prepare_image(frame)
+    print(f"frame {frame.shape} ({frame.nbytes / 1e6:.2f} MB) -> wire {sent.shape} "
+          f"({sent.nbytes / 1e3:.0f} KB)\n")
+
+    t0 = time.monotonic()
+    out = c.infer(frame, state, "latency check")
+    print(f"first call (includes XLA compile): {time.monotonic() - t0:.1f} s"
+          f"   actions {np.asarray(out['actions']).shape}\n")
+
+    lat = []
+    for i in range(n):
+        out = c.infer(frame, state, "latency check")
+        lat.append(out["client_latency_s"])
+        print(f"  {i + 1:2d}/{n}  {lat[-1] * 1000:6.0f} ms", end="\r")
+    lat = np.array(lat)
+
+    budget_s = 20 / c.fps          # DelayBudget.max_d ticks
+    p95 = float(np.quantile(lat, 0.95))
+    print(f"\n\nmean {lat.mean() * 1000:.0f} ms   p95 {p95 * 1000:.0f} ms   "
+          f"max {lat.max() * 1000:.0f} ms")
+    print(f"d at p95: {int(np.ceil(p95 * 1.15 * c.fps))} ticks "
+          f"(budget caps at 20 = {budget_s * 1000:.0f} ms)")
+    if p95 > budget_s:
+        print("\n  OVER BUDGET — the delay budget will saturate. Chunks splice at a "
+              "slot the\n  robot has already passed: no RTC continuity guarantee, "
+              "seams rest on the\n  clamp. Run --blocking, or move the server closer.")
+    else:
+        print(f"\n  OK — {(budget_s - p95) * 1000:.0f} ms of headroom.")
+
+
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, force=True)
     tyro.extras.subcommand_cli_from_dict({
@@ -417,4 +479,5 @@ if __name__ == "__main__":
         "hand-sweep": hand_sweep,
         "replay": replay,
         "replay-actions": replay_actions,
+        "latency": latency,
     })
