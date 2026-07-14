@@ -61,6 +61,56 @@ fail fast), no chunks arrive, the trajectory drains, and the starvation watchdog
 trips at 1.0 s and damps. Correct behaviour — but with a WAN in the loop it is a
 live risk, not a theoretical one.
 
+## Where the robot starts (`--start-from-episode`)
+
+The loop seeds itself from the **measured** joints and composes the policy's deltas
+onto them, so it is well-defined from any posture. That is exactly the trap: every
+training episode *starts* somewhere particular, so beginning a rollout with the arm
+somewhere else makes the very first observation out-of-distribution — and you get a
+bad rollout that reads as a bad checkpoint.
+
+```bash
+python -m ego2g1.deploy --start-from-episode 0 --dataset ../../lerobot_datasets/ego2g1/put_bottle_in_box ...
+```
+
+ramps to that episode's first posture (rate-limited to 0.5 rad/s, same as the
+bring-up rungs) before the loop starts. Without it the robot begins wherever it
+happens to be standing.
+
+## `eval_real` — teacher-forced eval on the real robot
+
+```bash
+python -m ego2g1.deploy.eval_real \
+    --dataset ../../lerobot_datasets/ego2g1/put_bottle_in_box \
+    --episode 0 --host 127.0.0.1 --port 8000 --k 25
+```
+
+The hardware twin of `ego2g1.eval_replay` (which runs the same loop in MuJoCo).
+Every K ticks: snap the arm back to the recording's ground-truth posture, feed the
+policy the **recorded** frame for that tick, execute the first K of the 50 actions
+it predicts, repeat. It prints the drift — `max |q − q_gt|` after each segment — and
+writes `eval_real.npz`.
+
+**Run this before the first live rollout.** A bad live rollout has two explanations
+that nothing else separates: the policy is bad, or the G1's head camera does not
+show what the Pico headset showed in training. That viewpoint risk fails quietly —
+a shifted FOV just looks like a mediocre checkpoint. Feeding the policy the
+recording's own frames removes the camera from the equation entirely, so anything
+that goes wrong is the policy, the transforms, or the robot.
+
+The converse is worth saying out loud: **this rung tells you nothing about whether
+the head camera is usable.** It is the control, not the experiment.
+
+The snap-back is a *ramp*, not a teleport — eval_replay can move a MuJoCo robot
+instantly and a real arm cannot, and after K ticks of drift the snap can be a large
+motion. So it goes through the rate limiter and then **settles** (`--settle-s`)
+before the next query: the anchor is the measured FK, and reading it while the arm
+is still coasting anchors the chunk on a pose the robot is not in. The pause costs
+nothing — a teacher-forced timeline is already discontinuous at every snap.
+
+No RTC, no async, no delay budget here. Those exist to make chunk seams continuous;
+this rung breaks the timeline at every seam on purpose.
+
 ## Client-side image resize (`--image-resize`)
 
 **Default: `(224, 224)`, i.e. on.** `PolicyClient._prepare_image` resizes the

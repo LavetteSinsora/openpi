@@ -36,21 +36,13 @@ from ego2g1.common import layout, se3
 
 
 def _ramp_seconds(q_now, q_start, ramp_s: float, max_speed: float) -> float:
-    """How long the ramp to the episode's first posture must take.
+    """See deploy/ramp.py — one implementation, shared with `deploy
+    --start-from-episode` and `eval_real`'s snap-back, so the three cannot drift
+    apart on the one thing they all get to be wrong about: how fast the arm moves
+    when nothing is watching it."""
+    from ego2g1.deploy.ramp import ramp_seconds
 
-    The ramp is a plain interpolation — it does NOT pass through the safety clamp,
-    which only guards knots leaving the IK. So a fixed 3 s is a promise about
-    duration, not about speed: if the arm is hanging at its side and the episode
-    opens with it reaching forward, that same 3 s is a lunge. Stretch the ramp
-    instead, and say so.
-    """
-    delta = float(np.abs(np.asarray(q_start) - np.asarray(q_now)).max())
-    needed = delta / max_speed
-    if needed > ramp_s:
-        print(f"  ramp stretched {ramp_s:.1f}s -> {needed:.1f}s "
-              f"({delta:.2f} rad at {max_speed:.2f} rad/s)")
-        return needed
-    return ramp_s
+    return ramp_seconds(q_now, q_start, ramp_s, max_speed)
 
 
 def _dataset_episode(root: str, episode: int = 0):

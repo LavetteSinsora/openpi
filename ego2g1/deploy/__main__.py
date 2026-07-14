@@ -15,10 +15,12 @@ Keep the remote in hand: ctrl-C damps, but the remote is the thing that always w
 
 import dataclasses
 import logging
+import pathlib
 import signal
 import sys
 import time
 
+import numpy as np
 import tyro
 
 from ego2g1.deploy import camera as _camera
@@ -51,6 +53,19 @@ class Args:
     # match the Pico egocentric viewpoint the training video came from.
     eye: str = "left"
     hands: bool = True
+
+    # --- starting posture ---
+    # The loop seeds itself from the MEASURED joints and composes the policy's
+    # deltas onto them, so it is well-defined from ANY pose — which is exactly the
+    # trap. The policy saw episodes that all START somewhere particular; begin the
+    # rollout with the arm somewhere else and the first observation is out of
+    # distribution, and you get a bad rollout that looks like a bad checkpoint.
+    # Give an episode and we ramp to its first posture first (rate-limited, as in
+    # check rungs 6/7). Without it, the robot simply starts wherever it stands.
+    start_from_episode: int | None = None
+    dataset: str | None = None             # required by --start-from-episode
+    ramp_s: float = 3.0
+    max_ramp_speed: float = 0.5
 
     # --- kinematics ---
     # The IK and the G1 model are the SAME ones that generated the labels. By
@@ -96,6 +111,20 @@ def main(args: Args) -> None:
                      enable_hands=args.hands)
     dds.connect()
     logging.info("lowstate OK. arm q = %s", dds.arm_q().round(3))
+
+    if args.start_from_episode is not None:
+        if args.dataset is None:
+            raise ValueError("--start-from-episode needs --dataset")
+        from ego2g1.deploy import ramp as _ramp
+        from ego2g1.eval_replay import dataset_io as dio
+
+        ep = dio.load_episode(pathlib.Path(args.dataset), args.start_from_episode)
+        q_start = ep.arm_qpos[0].astype(float)
+        hand_start = np.concatenate([ep.hand_left[0], ep.hand_right[0]]).astype(float)
+        logging.info("ramping to episode %d's first posture (max |delta| %.3f rad)",
+                     ep.episode_index, abs(q_start - dds.arm_q()).max())
+        _ramp.ramp_to(dds, q_start, hand_start, ramp_s=args.ramp_s,
+                      max_speed=args.max_ramp_speed, hands=args.hands)
 
     logging.info("connecting camera (%s eye) ...", args.eye)
     cam = _camera.HeadCamera(host=args.camera_host, eye=args.eye)
