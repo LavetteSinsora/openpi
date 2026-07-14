@@ -65,6 +65,15 @@ def build_per_slot_transforms(train_config, norm_stats, per_slot):
     )
 
 
+def serve_state_mode(train_config) -> str:
+    """The prompt state mode a checkpoint must be SERVED with, derived from the
+    one field the stamp carries. A blind checkpoint (p >= 1.0) never saw a state
+    digit and must not be shown one; a dropout checkpoint (0 < p < 1) was trained
+    to cope without the state but is given the real one at inference — dropout is
+    a train-time regularizer, not a deployment mode."""
+    return "blind" if train_config.state_dropout_p >= 1.0 else "real"
+
+
 def create_data_config(
     train_config,
     model_config,
@@ -72,12 +81,23 @@ def create_data_config(
     norm_assets_dir: pathlib.Path | str,
     per_slot_dir: pathlib.Path | str | None = None,
     skip_norm_stats: bool = False,
+    state_mode: str = "real",
+    dropout_p: float = 0.0,
+    shuffle_state_pool: np.ndarray | None = None,
 ) -> _config.DataConfig:
     """Build the full DataConfig. `norm_assets_dir` holds norm_stats.json (the
     config assets dir at train time; the checkpoint's assets/<asset_id>/ dir at
     serving). `per_slot_dir` holds per_slot_stats.npz — defaults to
     norm_assets_dir, but serving passes the run-level assets_ego2g1 dir, so the
-    two artifacts never have to live in the same directory."""
+    two artifacts never have to live in the same directory.
+
+    `state_mode` / `dropout_p` select how the prompt's state segment is built
+    (ego2g1.transforms.Ego2G1TokenizePrompt). Callers:
+      train loop   -> "dropout", p = train_config.state_dropout_p
+      val (real)   -> "real"      | val (blind)    -> "blind"
+      val (shuffled) -> "real" + shuffle_state_pool
+      serving      -> serve_state_mode(train_config)
+    `shuffle_state_pool` is diagnostic-only and must never be set for training."""
     norm_assets_dir = pathlib.Path(norm_assets_dir)
     per_slot_dir = pathlib.Path(per_slot_dir) if per_slot_dir is not None else norm_assets_dir
 
@@ -88,11 +108,17 @@ def create_data_config(
         per_slot = _norm.load_per_slot(per_slot_dir)
         per_slot_transforms = build_per_slot_transforms(train_config, norm_stats, per_slot)
 
+    data_inputs = [
+        chunk_math.RelativeChunkActions(hands=tuple(train_config.hands)),
+        _ego_transforms.Ego2G1Inputs(model_type=model_config.model_type),
+    ]
+    if shuffle_state_pool is not None:
+        # before Normalize: the pool holds RAW states, so the rest of the stack
+        # (norm, per-slot neutralization, digitization) treats them identically
+        # to a genuine state.
+        data_inputs.append(_ego_transforms.ShuffleState(pool=shuffle_state_pool))
     data_transforms = _transforms.Group(
-        inputs=[
-            chunk_math.RelativeChunkActions(hands=tuple(train_config.hands)),
-            _ego_transforms.Ego2G1Inputs(model_type=model_config.model_type),
-        ],
+        inputs=data_inputs,
         outputs=[_ego_transforms.Ego2G1Outputs(action_dim=train_config.action_dim_actual)],
     )
 
@@ -102,13 +128,26 @@ def create_data_config(
         forward, inverse = per_slot_transforms
         model_inputs.append(forward)
         model_outputs.append(inverse)
+    if model_config.discrete_state_input:
+        # Ego2G1TokenizePrompt owns the prompt string so the state segment can be
+        # withheld; with state_mode="real" it is byte-identical to stock.
+        tokenize = _ego_transforms.Ego2G1TokenizePrompt(
+            tokenizer=_ego_transforms.Ego2G1Tokenizer(model_config.max_token_len),
+            mode=state_mode,
+            dropout_p=dropout_p,
+        )
+    else:
+        # pi0-style prompt (no state, no Task:/State:/Action: scaffold) — a
+        # different prompt TEMPLATE, not just a withheld state. state_mode is
+        # moot here; config.__post_init__ forbids combining the two.
+        tokenize = _transforms.TokenizePrompt(
+            _tokenizer.PaligemmaTokenizer(model_config.max_token_len),
+            discrete_state_input=False,
+        )
     model_inputs += [
         _ego_transforms.AppendControlMode(control_mode=train_config.control_mode),
         _transforms.ResizeImages(224, 224),
-        _transforms.TokenizePrompt(
-            _tokenizer.PaligemmaTokenizer(model_config.max_token_len),
-            discrete_state_input=model_config.discrete_state_input,
-        ),
+        tokenize,
         _transforms.PadStatesAndActions(model_config.action_dim),
     ]
     model_transforms = _transforms.Group(inputs=model_inputs, outputs=model_outputs)

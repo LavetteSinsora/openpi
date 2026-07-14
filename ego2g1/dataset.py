@@ -88,6 +88,27 @@ def build_split_indices(dataset_root, action_horizon, val_real_episodes=(), allo
     return SplitIndices(train=indices_for(False), val=indices_for(True))
 
 
+def raw_state_pool(train_config, *, split: str = "val") -> np.ndarray:
+    """Every raw 30-dim state of a split's episodes, read straight from the
+    parquet — no video decode, so it costs milliseconds. Feeds the shuffled-state
+    val pool (ego2g1.transforms.ShuffleState)."""
+    import pandas as pd
+
+    root = pathlib.Path(train_config.dataset_root).resolve()
+    meta = load_extraction_meta(root)
+    val_sources = set(train_config.val_real_episodes)
+    frames = []
+    for idx_str, e in meta["episodes"].items():
+        i = int(idx_str)
+        if (e["source_episode"] in val_sources) != (split == "val"):
+            continue
+        path = root / "data" / f"chunk-{i // 1000:03d}" / f"episode_{i:06d}.parquet"
+        frames.append(np.stack(pd.read_parquet(path, columns=["state"])["state"].to_numpy()))
+    if not frames:
+        raise ValueError(f"split {split!r} has no episodes — cannot build a state pool")
+    return np.concatenate(frames).astype(np.float32)
+
+
 def create_dataset(train_config, model_config, *, split: str = "train"):
     """LeRobot dataset with pose/hand delta_timestamps, wrapped to expose only
     the boundary-valid datapoints of the requested split. Emits raw samples;

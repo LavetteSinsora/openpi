@@ -236,6 +236,9 @@ def create_policy(checkpoint_dir: str | pathlib.Path, *, default_prompt: str | N
     pooled_dir, per_slot_dir = resolve_norm_assets(checkpoint_dir, run_dir, train_config, assets_dir)
     data_cfg = _data_config.create_data_config(
         train_config, model_config, norm_assets_dir=pooled_dir, per_slot_dir=per_slot_dir,
+        # a blind checkpoint (state_dropout_p >= 1.0) never saw a state digit and
+        # must not be shown one; a dropout checkpoint is served WITH the real state.
+        state_mode=_data_config.serve_state_mode(train_config),
     )
 
     import openpi.transforms as transforms

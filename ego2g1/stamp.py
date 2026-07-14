@@ -25,6 +25,7 @@ SUPPORTED_FEATURES = frozenset({
     "relative_chunk_actions",
     "action_dim_actual",
     "rtc_training",
+    "state_masking",
 })
 
 

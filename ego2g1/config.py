@@ -47,8 +47,21 @@ class Ego2G1TrainConfig:
     # WARNING: False makes the policy state-BLIND — the pi05 architecture has no
     # continuous state token (that's the pi0 path), so the prompt is the ONLY
     # way proprioception reaches the model. False also changes the prompt
-    # template away from what pi05_base pretrained with.
+    # template away from what pi05_base pretrained with — prefer state_dropout_p
+    # below, which withholds the state WITHOUT touching the template.
     discrete_state_input: bool = True
+    # Probability that a training sample's state digits are replaced by the word
+    # "unknown" (ego2g1.transforms.STATE_SENTINEL). Reduces the policy's reliance
+    # on proprioception, which real-robot evals suggest it memorizes at the
+    # expense of the visual pathway. Three regimes:
+    #   0.0 — baseline: real state on every sample (prompt byte-identical to stock)
+    #   0.5 — dropout: coin flip per sample at TRAIN time only; val and SERVING
+    #         always get the real state (the model must cope without it, but is
+    #         still given it)
+    #   1.0 — blind: the state is withheld at train AND val AND serving time
+    # Serving mode is derived from this field alone (data_config.serve_state_mode),
+    # so a checkpoint carries its own prompt semantics and cannot be mis-served.
+    state_dropout_p: float = 0.0
 
     # --- normalization ---
     per_slot_floor_c: float = 0.1 # parameter for per dim, per time-slot normalization
@@ -71,14 +84,17 @@ class Ego2G1TrainConfig:
 
     # --- training ---
     batch_size: int = 32
-    num_train_steps: int = 20000
-    
+    num_train_steps: int = 10000
+
     log_interval: int = 100 # interval of logging train loss, etc.
     save_interval: int = 1000 # interval of saving model checkpoint (for resuming training. new checkpoint saved, old deleted)
-    keep_period: int = 5000 # interval of storing not-deleted checkpoints (for offline diagnostic)
-    eval_interval: int = 1000 # interval of running eval (e.g., record loss on validation set), 0 disables 
+    keep_period: int = 2500 # interval of storing not-deleted checkpoints (for offline diagnostic)
+    # eval/probe cadence: the val minimum lands around step ~1k on this dataset,
+    # so 250 resolves it instead of sampling it once. The best-val checkpoint
+    # (checkpoints/<name>/<exp>/best/) is re-crowned at every eval.
+    eval_interval: int = 250 # interval of running eval (e.g., record loss on validation set), 0 disables
     eval_num_batches: int = 4
-    probe_interval: int = 1000 # interval of running attention allocation probe
+    probe_interval: int = 250 # interval of running attention allocation probe
     probe_batch_size: int = 2
     
     num_workers: int = 2
@@ -109,6 +125,11 @@ class Ego2G1TrainConfig:
             raise ValueError(f"warmup_steps={self.warmup_steps} >= num_train_steps={self.num_train_steps}")
         if self.model_space_clamp is not None and self.model_space_clamp <= 1.0:
             raise ValueError(f"model_space_clamp={self.model_space_clamp} must be > 1 (or None)")
+        if not 0.0 <= self.state_dropout_p <= 1.0:
+            raise ValueError(f"state_dropout_p={self.state_dropout_p} must be in [0, 1]")
+        if self.state_dropout_p > 0.0 and not self.discrete_state_input:
+            raise ValueError("state_dropout_p masks the state IN the prompt; it is meaningless "
+                             "with discrete_state_input=False (which removes the prompt state entirely)")
 
     # --- derived ---
 
@@ -166,6 +187,10 @@ class Ego2G1TrainConfig:
             # train-side label surgery only; informational
             "model_space_clamp": {"required": False, "value": self.model_space_clamp},
             "control_mode_prompt": {"required": True, "mode": self.control_mode},
+            # required ONLY for a fully blind checkpoint: serving must withhold the
+            # state exactly as training did. A dropout checkpoint (0 < p < 1) is
+            # served WITH the real state, which is stock behavior — informational.
+            "state_masking": {"required": self.state_dropout_p >= 1.0, "p": self.state_dropout_p},
             "relative_chunk_actions": {"required": True},
             **{k: {"required": False, "value": v}
                for k, v in self.model_config().feature_flags().items()},

@@ -17,6 +17,7 @@ similarity grid + summary stats, to quantify the visual embodiment gap.
 """
 
 import dataclasses
+import functools
 
 import einops
 import flax.linen as nn
@@ -28,6 +29,7 @@ import numpy as np
 import openpi.models.gemma as gemma
 import openpi.models.model as _model
 import openpi.models.pi0 as _pi0
+import openpi.models.tokenizer as _paligemma_tokenizer
 
 
 class SowingAttention(gemma.Attention):
@@ -120,16 +122,40 @@ class SowingAttention(gemma.Attention):
 
 @dataclasses.dataclass(frozen=True)
 class TokenGroups:
-    """Half-open [start, end) index ranges over the joint prefix+suffix sequence."""
+    """Per-sample masks over the joint prefix+suffix sequence.
+
+    Masks, not [start, end) ranges: on pi05 the state lives INSIDE the prompt as
+    digit tokens, and its token count varies per sample (each of the 30 values is
+    1-3 characters, packed differently by sentencepiece), so the task/state
+    boundary is not shared across a batch."""
 
     names: tuple[str, ...]
-    bounds: tuple[tuple[int, int], ...]
+    masks: np.ndarray  # (G, B, S) float32
 
 
-def token_groups(model: _pi0.Pi0, obs: _model.Observation) -> TokenGroups:
-    """Group boundaries matching embed_prefix's concatenation order
-    (images in obs.images order, then text) + the action suffix."""
-    names, bounds = [], []
+@functools.lru_cache(maxsize=1)
+def digit_token_ids() -> np.ndarray:
+    """Vocab ids whose piece is a bare number — i.e. exactly the tokens the pi05
+    state segment is made of. The task string and the <<<control_mode>>> marker
+    contain no digits, so this splits prompt-from-state exactly on our template;
+    under the "unknown" sentinel it selects nothing, and text/state reads a true 0."""
+    sp = _paligemma_tokenizer.PaligemmaTokenizer(48)._tokenizer  # noqa: SLF001
+    return np.asarray(
+        [i for i in range(sp.get_piece_size()) if sp.id_to_piece(i).replace("▁", "").isdigit()]
+    )
+
+
+def token_groups(
+    model: _pi0.Pi0, obs: _model.Observation, *, state_token_ids: np.ndarray | None = None
+) -> TokenGroups:
+    """Groups matching embed_prefix's concatenation order (images in obs.images
+    order, then text) + the action suffix. With `state_token_ids`, the text group
+    splits into text/task and text/state. Prompt PADDING belongs to no group —
+    it is masked out of attention, so it carries ~0 mass and the groups still
+    partition the attention simplex."""
+    b = obs.state.shape[0]
+    names: list[str] = []
+    spans: list[tuple[int, int]] = []
     start = 0
     n = None  # all cameras share one resolution -> one SigLIP call to count tokens
     for name in obs.images:
@@ -137,21 +163,57 @@ def token_groups(model: _pi0.Pi0, obs: _model.Observation) -> TokenGroups:
             image_tokens, _ = model.PaliGemma.img(obs.images[name], train=False)
             n = image_tokens.shape[1]
         names.append(f"img/{name}")
-        bounds.append((start, start + n))
+        spans.append((start, start + n))
         start += n
+
+    text_start, text_len = None, 0
     if obs.tokenized_prompt is not None:
-        n = obs.tokenized_prompt.shape[1]
-        names.append("text")
-        bounds.append((start, start + n))
-        start += n
+        text_start = start
+        text_len = obs.tokenized_prompt.shape[1]
+        start += text_len
+
     prefix_len = start
-    if not model.pi05:
-        names.append("state")
-        bounds.append((prefix_len, prefix_len + 1))
+    state_span = None
+    if not model.pi05:  # pi0 only: a continuous state token in the suffix
+        state_span = (prefix_len, prefix_len + 1)
         start += 1
-    names.append("action")
-    bounds.append((start, start + model.action_horizon))
-    return TokenGroups(names=tuple(names), bounds=tuple(bounds))
+    action_span = (start, start + model.action_horizon)
+    total = action_span[1]
+
+    def const(a: int, z: int) -> np.ndarray:
+        m = np.zeros((b, total), np.float32)
+        m[:, a:z] = 1.0
+        return m
+
+    out_names, out_masks = [], []
+    for name, (a, z) in zip(names, spans, strict=True):
+        out_names.append(name)
+        out_masks.append(const(a, z))
+
+    if text_start is not None:
+        ids = np.asarray(obs.tokenized_prompt)
+        valid = (
+            np.asarray(obs.tokenized_prompt_mask).astype(bool)
+            if obs.tokenized_prompt_mask is not None
+            else np.ones(ids.shape, bool)
+        )
+        if state_token_ids is not None:
+            is_state = np.isin(ids, state_token_ids) & valid
+            text_groups = [("text/task", valid & ~is_state), ("text/state", is_state)]
+        else:
+            text_groups = [("text", valid)]
+        for name, sub in text_groups:
+            m = np.zeros((b, total), np.float32)
+            m[:, text_start : text_start + text_len] = sub.astype(np.float32)
+            out_names.append(name)
+            out_masks.append(m)
+
+    if state_span is not None:
+        out_names.append("state")
+        out_masks.append(const(*state_span))
+    out_names.append("action")
+    out_masks.append(const(*action_span))
+    return TokenGroups(names=tuple(out_names), masks=np.stack(out_masks))
 
 
 def _llm_params(model: _pi0.Pi0) -> dict:
@@ -169,9 +231,15 @@ def attention_allocation(
     *,
     time_value: float = 0.5,
     rng=None,
+    state_token_ids: np.ndarray | None = None,
 ) -> dict:
     """Train-style joint forward at one flow timestep; returns where the
     action-token queries put their attention mass.
+
+    `state_token_ids` (pass diagnostics.digit_token_ids()) splits the text group
+    into text/task and text/state — on pi05 the state IS text, so without the
+    split the two are indistinguishable and the state-reliance question the probe
+    exists to answer cannot be read off it.
 
     Returns dict with:
       group_names: (G,) names
@@ -182,7 +250,7 @@ def attention_allocation(
     """
     rng = rng if rng is not None else jax.random.key(0)
     obs = _model.preprocess_observation(None, obs, train=False)
-    groups = token_groups(model, obs)
+    groups = token_groups(model, obs, state_token_ids=state_token_ids)
 
     noise = jax.random.normal(rng, actions.shape)
     t = jnp.full(actions.shape[0], time_value, dtype=jnp.float32)
@@ -217,9 +285,9 @@ def attention_allocation(
         probs = inter["intermediates"]["attn"]["probs"][0]  # (B, K, G, T, S) f32
         probs = einops.rearrange(probs, "B K G T S -> B (K G) T S")
         action_rows = probs[:, :, -n_action:, :]  # (B, H, ah, S)
-        mass = np.stack(
-            [np.asarray(action_rows[..., a:b].sum(-1)) for (a, b) in groups.bounds], axis=-1
-        )  # (B, H, ah, G)
+        # (B,H,ah,S) x (G,B,S) -> (B,H,ah,G): per-sample masks, so the task/state
+        # split can sit at a different token index in every row of the batch.
+        mass = np.einsum("bhas,gbs->bhag", np.asarray(action_rows, np.float32), groups.masks)
         per_layer.append(mass.mean(axis=(0, 1, 2)))
         per_slot_layers.append(mass.mean(axis=(0, 1)))
         p = np.asarray(action_rows)
