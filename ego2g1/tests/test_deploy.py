@@ -483,6 +483,48 @@ def test_serve_record_reads_metadata_before_wrapping():
     assert text.index("meta = policy.metadata") < text.index("PolicyRecorder(policy")
 
 
+def test_ramp_into_is_continuous_with_the_command_stream():
+    """The snap-back must continue the command stream, not restart it.
+
+    eval_real ramps back to ground truth between segments while its 500 Hz emitter
+    keeps sending. If the ramp were seeded at the MEASURED joints, the command would
+    step by the servo tracking error (~0.1 rad under load) in a single emitter
+    period — a jerk, produced by the very code meant to move the arm gently. Seed at
+    what the emitter is sending instead: eval(now) must not change across the reseed.
+    """
+    from ego2g1.deploy import ramp as _ramp
+
+    traj = TrajectoryBuffer(layout.ARM_DOF)
+    t0 = 100.0
+    traj.seed(t0, np.zeros(layout.ARM_DOF))
+    traj.push(t0 + 1.0, np.full(layout.ARM_DOF, 0.5))     # mid-motion
+
+    now = t0 + 0.5
+    commanded = traj.eval(now).copy()                     # what the emitter is sending
+
+    # The arm LAGS the command; the ramp must ignore that and continue from the
+    # command, not from where the robot actually is.
+    measured = commanded - 0.1
+    landed = _ramp.ramp_into(traj, None, now, measured, ramp_s=3.0, max_speed=0.5,
+                             verbose=False)
+
+    assert traj.eval(now) == pytest.approx(commanded), "command jumped at the reseed"
+    assert landed > now
+    # and it converges on the target it was given
+    assert traj.eval(landed) == pytest.approx(measured, abs=1e-9)
+
+
+def test_ramp_seconds_stretches_to_hold_the_speed_limit():
+    """A fixed ramp duration is a promise about time, not speed: the same 3 s that is
+    gentle from a nearby pose is a lunge from across the workspace."""
+    from ego2g1.deploy import ramp as _ramp
+
+    near = _ramp.ramp_seconds(np.zeros(3), np.full(3, 0.3), 3.0, 0.5, verbose=False)
+    far = _ramp.ramp_seconds(np.zeros(3), np.full(3, 3.0), 3.0, 0.5, verbose=False)
+    assert near == 3.0                       # 0.3 rad in 3 s is well under 0.5 rad/s
+    assert far == pytest.approx(6.0)         # 3.0 rad at 0.5 rad/s cannot be done in 3
+
+
 def test_dataset_camera_matches_head_camera():
     """Rung 7 swaps the real camera for DatasetCamera, so the stub must implement
     everything the loop calls on a camera. It did not implement age() — the loop's

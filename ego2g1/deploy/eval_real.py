@@ -25,11 +25,32 @@ Why this rung exists, and why it is the one to run BEFORE a live rollout:
 
 The reset is a RAMP, not a teleport. eval_replay snaps its MuJoCo robot to ground
 truth instantly; a real arm cannot, and by the time the policy has drifted for K
-ticks the snap-back can be a large motion. So it goes through `ramp.ramp_to` at the
-same 0.5 rad/s the bring-up rungs use, and then SETTLES before the next query — the
+ticks the snap-back can be a large motion. So it is rate-limited to the same
+0.5 rad/s the bring-up rungs use, and then SETTLES before the next query — the
 anchor is the measured FK, and reading it mid-coast anchors the chunk on a pose the
 robot is not in. The pause costs nothing: a teacher-forced timeline is already
 discontinuous at every snap. That is what the "visible snap" is.
+
+Two threads, and the reason they exist:
+
+  T1 arm emitter   500 Hz   traj_arm.eval(now)  -> rt/lowcmd
+  T2 hand emitter  200 Hz   traj_hand.eval(now) -> rt/brainco/*/cmd
+
+The emitters run for the WHOLE rung and never stop. Everything else — the ramp, the
+settle, the ~300 ms websocket call, the IK solves — only pushes knots into the
+buffers they read. Emitting inline instead (ramp, then stop; infer, then resume)
+leaves the command stream dark for a third of a second at every segment boundary,
+which is both a gap in the 500 Hz stream and an invitation to resume from the wrong
+place. While nothing is pushing, the emitter holds the last knot: still a live
+command, still at 500 Hz.
+
+That is also why every new segment is seeded from `traj.eval(now)` — the value the
+emitter is sending this instant — and never from the measured joints. The arm lags
+its command by the servo tracking error (~0.1 rad under load); reseeding at the
+measured pose would step the command backwards by exactly that error, in one emitter
+period. Command continuity is a property of the command stream, not of the robot.
+The MEASURED pose is still what the policy gets anchored on — but only after the
+settle, when the two have converged.
 
 Blocking by nature — no RTC, no async, no delay budget. Those exist to make chunk
 SEAMS continuous, and this rung deliberately breaks the timeline at every seam.
@@ -38,6 +59,7 @@ SEAMS continuous, and this rung deliberately breaks the timeline at every seam.
 import dataclasses
 import logging
 import pathlib
+import threading
 import time
 
 import numpy as np
@@ -138,6 +160,55 @@ def main(args: Args) -> None:
     if input("\nramp to the episode tick and start? [y/N] ").strip().lower() != "y":
         return
 
+    # --- the emitters. They run until the rung ends and never stop sending. ------
+    traj_arm = TrajectoryBuffer(layout.ARM_DOF)
+    traj_hand = TrajectoryBuffer(n * len(layout.HANDS))
+    now = time.monotonic()
+    traj_arm.seed(now, dds.arm_q())
+    _, hand0 = gt_at(args.start_tick)
+    traj_hand.seed(now, np.concatenate([hand0[h] for h in layout.HANDS]))
+
+    stop = threading.Event()
+    failed: list[str] = []
+
+    def emit(traj, send, hz):
+        """Hold the last knot when nothing is pushing — a held command is still a
+        command. A dead emitter thread, by contrast, leaves the arm stiff at
+        whatever it last heard, so any exception here must damp."""
+        period = 1.0 / hz
+        try:
+            while not stop.is_set():
+                t0 = time.perf_counter()
+                v = traj.eval(time.monotonic())
+                if v is not None:
+                    send(v)
+                traj.prune(time.monotonic())
+                time.sleep(max(0.0, period - (time.perf_counter() - t0)))
+        except Exception as e:                      # noqa: BLE001
+            failed.append(f"{threading.current_thread().name}: {e}")
+            logger.exception("emitter died")
+            stop.set()
+            dds.damp()
+
+    def send_hands(v):
+        dds.send_hands({h: v[i * n:(i + 1) * n] for i, h in enumerate(layout.HANDS)})
+
+    threads = [threading.Thread(target=emit, args=(traj_arm, dds.send_arm, 500.0),
+                                name="emit-arm", daemon=True)]
+    if args.hands:
+        threads.append(threading.Thread(target=emit, args=(traj_hand, send_hands, 200.0),
+                                        name="emit-hand", daemon=True))
+    for t in threads:
+        t.start()
+
+    def wait_until(t_end: float) -> None:
+        """The emitters are doing the work; this thread only waits — and dies if an
+        emitter has died, rather than sitting out the rest of a segment blind."""
+        while time.monotonic() < t_end:
+            if failed:
+                raise RuntimeError(failed[0])
+            time.sleep(0.002)
+
     log = []
     tick = args.start_tick
     seg = 0
@@ -146,14 +217,20 @@ def main(args: Args) -> None:
             if args.max_segments and seg >= args.max_segments:
                 break
 
-            # --- teacher forcing: back to ground truth, then STOP moving ---------
+            # --- teacher forcing: ramp back to ground truth, then let it SETTLE ---
+            # Knots only. The emitters keep sending throughout, including through the
+            # settle and through the inference call below.
             q_gt, hand_gt = gt_at(tick)
             print(f"\nsegment {seg}: snap to tick {tick}/{ep.n_frames - 1}")
-            residual = _ramp.ramp_to(
-                dds, q_gt, np.concatenate([hand_gt[h] for h in layout.HANDS]),
+            landed = _ramp.ramp_into(
+                traj_arm, traj_hand if args.hands else None, time.monotonic(),
+                q_gt, np.concatenate([hand_gt[h] for h in layout.HANDS]),
                 ramp_s=args.ramp_s, max_speed=args.max_ramp_speed,
-                hands=args.hands, settle_s=args.settle_s,
             )
+            wait_until(landed + args.settle_s)
+
+            residual = float(np.abs(dds.arm_q() - q_gt).max())
+            print(f"  at ground truth (residual {residual:.3f} rad)")
             if residual > 0.15:
                 raise RuntimeError(
                     f"arm did not reach the ground-truth posture (residual "
@@ -161,29 +238,30 @@ def main(args: Args) -> None:
                     f"not in would send it somewhere else entirely.")
 
             # --- query: MEASURED anchor + state, RECORDED image ------------------
+            # Measured, not commanded: the policy must be anchored on where the arm
+            # actually IS. Safe to read here and nowhere else — the settle is what
+            # makes measured and commanded the same pose.
             arm_q = dds.arm_q()
             kin.ground(arm_q)
             anchor = kin.flange_poses(arm_q)
-            # The hand block of the state is what we are COMMANDING right now, which
-            # after the snap is the ground-truth hand. Same convention the live loop
-            # uses (the emitter's current value), and in-distribution here by
-            # construction.
             state = kin.state(arm_q, hand_gt)
 
-            out = client.infer(frames[tick], state, ep.task)
+            out = client.infer(frames[tick], state, ep.task)   # ~300 ms; emitters hold
             actions = np.asarray(out["actions"], dtype=np.float32)
             logger.info("segment %d: tick %d, %.0f ms, sampler=%s", seg, tick,
                         out["client_latency_s"] * 1000,
                         out.get("rtc", {}).get("sampler", "?"))
 
             # --- execute the first K, through the REAL transforms ---------------
-            traj = TrajectoryBuffer(layout.ARM_DOF)
-            htraj = TrajectoryBuffer(n * len(layout.HANDS))
+            # The first knot is one tick after the LAST COMMAND, not after the
+            # measured pose: continue the stream, do not restart it.
             t0 = time.monotonic()
-            traj.seed(t0, arm_q)
-            htraj.seed(t0, np.concatenate([hand_gt[h] for h in layout.HANDS]))
-            clamp.reset(arm_q)
+            q_cmd = traj_arm.eval(t0)
+            traj_arm.reseed(t0, q_cmd)
+            traj_hand.reseed(t0, traj_hand.eval(t0))
+            clamp.reset(q_cmd)
 
+            n_exec = 0
             for k in range(args.k):
                 if tick + k >= ep.n_frames - 1:
                     break
@@ -192,31 +270,25 @@ def main(args: Args) -> None:
                     raise RuntimeError(f"non-finite or absurd action at slot {k}")
                 targets = _chunk.targets_from(action, anchor)
                 q = clamp(kin.solve(targets), dt)
-                traj.push(t0 + (k + 1) * dt, q)
+                traj_arm.push(t0 + (k + 1) * dt, q)
                 hands = _chunk.hands_from(action)
-                htraj.push(t0 + (k + 1) * dt,
-                           np.concatenate([hands[h] for h in layout.HANDS]))
+                traj_hand.push(t0 + (k + 1) * dt,
+                               np.concatenate([hands[h] for h in layout.HANDS]))
+                n_exec += 1
 
-            end = t0 + (args.k + 1) * dt
-            while time.monotonic() < end:
-                t = time.monotonic()
-                q = traj.eval(t)
-                if q is not None:
-                    dds.send_arm(q)
-                if args.hands:
-                    v = htraj.eval(t)
-                    if v is not None:
-                        dds.send_hands({h: v[i * n:(i + 1) * n]
-                                        for i, h in enumerate(layout.HANDS)})
-                time.sleep(1 / 500)
+            # IK solving above took real time (~1 ms/knot). The knots are timestamped
+            # from t0 regardless, so the emitter is already partway through them by
+            # the time we get here — that is fine and intended, and it is why the
+            # knots carry absolute times rather than being fed one per iteration.
+            wait_until(t0 + (n_exec + 1) * dt)
 
-            # Where the policy actually took the arm, vs where the recording says it
-            # should be K ticks on. This is the number the rung exists to produce.
+            # Where the policy took the arm, vs where the recording says it should be
+            # K ticks on. This is the number the rung exists to produce.
             q_end = dds.arm_q()
-            t_end = min(tick + args.k, ep.n_frames - 1)
+            t_end = min(tick + n_exec, ep.n_frames - 1)
             q_gt_end = ep.arm_qpos[t_end].astype(np.float64)
             err = float(np.abs(q_end - q_gt_end).max())
-            print(f"  after {args.k} ticks: max |q - q_gt| = {err:.3f} rad")
+            print(f"  after {n_exec} ticks: max |q - q_gt| = {err:.3f} rad")
             log.append({"segment": seg, "tick": tick, "q_end": q_end,
                         "q_gt_end": q_gt_end, "err": err})
 
@@ -226,8 +298,13 @@ def main(args: Args) -> None:
         print("\neval complete.")
     except KeyboardInterrupt:
         print("\ninterrupted")
+    except Exception as e:                          # noqa: BLE001
+        print(f"\nABORTED: {e}")
     finally:
         print("damping.")
+        stop.set()
+        for t in threads:
+            t.join(timeout=1.0)
         dds.damp()
 
     if log:

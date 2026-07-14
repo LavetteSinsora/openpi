@@ -38,37 +38,66 @@ def ramp_seconds(q_now, q_target, ramp_s: float, max_speed: float,
     return ramp_s
 
 
+def ramp_into(traj, htraj, now: float, q_target, hand_target=None, *,
+              ramp_s: float = 3.0, max_speed: float = 0.5,
+              verbose: bool = True) -> float:
+    """Push the ramp as knots into trajectories something ELSE is emitting from.
+
+    Returns the monotonic time the ramp lands.
+
+    The ramp starts from `traj.eval(now)` — the value the emitter is sending THIS
+    INSTANT — and never from the measured joints. Seeding a new segment at the
+    measured pose looks more "honest" and is in fact a step discontinuity: the arm
+    lags its command by the servo tracking error (0.1 rad is normal under load), so
+    the command would jump backwards by that error in one emitter period. Command
+    continuity is a property of the command stream, not of the robot.
+    """
+    q_from = traj.eval(now)
+    ramp_s = ramp_seconds(q_from, q_target, ramp_s, max_speed, verbose=verbose)
+
+    traj.reseed(now, q_from)
+    traj.push(now + ramp_s, np.asarray(q_target, dtype=np.float64))
+
+    if htraj is not None and hand_target is not None:
+        h_from = htraj.eval(now)
+        htraj.reseed(now, h_from)
+        htraj.push(now + ramp_s, np.asarray(hand_target, dtype=np.float64))
+
+    return now + ramp_s
+
+
 def ramp_to(dds, q_target, hand_target=None, *, ramp_s: float = 3.0,
             max_speed: float = 0.5, hands: bool = True, settle_s: float = 0.3,
             hz: float = 500.0, verbose: bool = True) -> float:
-    """Interpolate the arm from where it IS to `q_target`, then settle.
+    """Standalone ramp: own the emitter, move the arm, settle, return.
+
+    For callers with no control loop running (the bring-up rungs, `deploy
+    --start-from-episode`). Where an emitter is already running, use `ramp_into`
+    instead and let it keep emitting — starting a second one would fight it.
 
     Returns the residual (rad) between the target and where the arm actually ended
-    up. A large residual means the arm did not track the ramp — it is being blocked,
-    or the PD gains cannot hold it against gravity in that pose — and nothing
-    downstream that anchors on the measured pose will be meaningful.
+    up. A large residual means the arm did not track the ramp — it is blocked, or
+    the PD cannot hold it against gravity in that pose — and nothing downstream that
+    anchors on the measured pose will be meaningful.
     """
     from ego2g1.deploy.trajectory import TrajectoryBuffer
 
     q_target = np.asarray(q_target, dtype=np.float64)
-    q0 = dds.arm_q()
-    ramp_s = ramp_seconds(q0, q_target, ramp_s, max_speed, verbose=verbose)
-
     n = layout.HAND_DIM
-    traj = TrajectoryBuffer(layout.ARM_DOF)
     now = time.monotonic()
-    traj.seed(now, q0)
-    traj.push(now + ramp_s, q_target)
 
+    traj = TrajectoryBuffer(layout.ARM_DOF)
+    traj.seed(now, dds.arm_q())        # nothing is emitting yet, so measured IS the command
     htraj = None
     if hands and hand_target is not None:
-        hand_target = np.asarray(hand_target, dtype=np.float64)
-        htraj = TrajectoryBuffer(len(hand_target))
-        htraj.seed(now, hand_target)          # hands are fast; no need to interpolate
-        htraj.push(now + ramp_s, hand_target)
+        htraj = TrajectoryBuffer(len(np.asarray(hand_target)))
+        htraj.seed(now, np.asarray(hand_target, dtype=np.float64))
+
+    landed = ramp_into(traj, htraj, now, q_target, hand_target,
+                       ramp_s=ramp_s, max_speed=max_speed, verbose=verbose)
 
     period = 1.0 / hz
-    end = now + ramp_s + settle_s             # hold the target through the settle
+    end = landed + settle_s            # hold the target through the settle
     while time.monotonic() < end:
         t = time.monotonic()
         q = traj.eval(t)
