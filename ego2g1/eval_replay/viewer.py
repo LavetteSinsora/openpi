@@ -148,7 +148,8 @@ def compose_frame(img_gt, img_eval, img_video, t, step_label, gt_hands, eval_han
     return np.concatenate([gt, strip, ev, strip, vid], axis=1)
 
 
-def run_interactive(ep, eval_arm, eval_hl, eval_hr, query_ticks, mount, fps=30):
+def run_interactive(ep, eval_arm, eval_hl, eval_hr, query_ticks, mount, fps=30,
+                    data_extraction_root=None):
     """Orbitable mujoco viewer: GT (left) + eval (right) in one scene. Drag to
     rotate/zoom/pan; SPACE play/pause, left/right arrow step. Loops."""
     import time
@@ -158,7 +159,7 @@ def run_interactive(ep, eval_arm, eval_hl, eval_hr, query_ticks, mount, fps=30):
 
     from ego2g1.eval_replay.scene import TwoRobotScene
 
-    scene = TwoRobotScene(hand_mount=mount)
+    scene = TwoRobotScene(hand_mount=mount, data_extraction_root=data_extraction_root)
     T = ep.n_frames
     state = {"t": 0, "paused": False}
 
@@ -236,13 +237,16 @@ def main():
     mse = eef_proprioception_mse(ep, eval_arm, ik_r)
 
     if args.interactive:
-        run_interactive(ep, eval_arm, eval_hl, eval_hr, query_ticks, mount)
+        run_interactive(ep, eval_arm, eval_hl, eval_hr, query_ticks, mount,
+                        data_extraction_root=args.data_extraction_path)
         return
 
     video = dio.read_video_frames(ep.video_path, ep.n_frames, ep.fps)
     T = min(ep.n_frames, len(video))
-    gt_r = G1Renderer(with_hands=args.hands, hand_mount=mount)
-    eval_r = G1Renderer(with_hands=args.hands, hand_mount=mount)
+    gt_r = G1Renderer(with_hands=args.hands, hand_mount=mount,
+                      data_extraction_root=args.data_extraction_path)
+    eval_r = G1Renderer(with_hands=args.hands, hand_mount=mount,
+                        data_extraction_root=args.data_extraction_path)
     print("rendering frames...")
     comps = []
     for t in range(T):

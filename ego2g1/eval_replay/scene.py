@@ -16,15 +16,46 @@ def _import_sim():
     return g1, frames, hand_constants
 
 
+def load_mount_quats(data_extraction_root=None):
+    """Per-side flange->Revo2-base rotation as a wxyz quat, from the extraction's
+    b_calib stage (`mount_R_{side}`, data_extraction/s002_action_label/b_alignment.py:109
+    — the rotation that makes the mounted hand's palm coincide with the mean human
+    palm). This is the authoritative hand mount; identity is NOT correct.
+    Returns None (identity, with a warning) if b_calib.npz cannot be found."""
+    import pathlib
+
+    from scipy.spatial.transform import Rotation
+
+    roots = []
+    if data_extraction_root is not None:
+        roots.append(pathlib.Path(data_extraction_root))
+    try:
+        import data_extraction
+        roots.append(pathlib.Path(data_extraction.__file__).resolve().parent.parent)
+    except Exception:  # noqa: BLE001
+        pass
+    for root in roots:
+        p = root / "data_extraction" / "work" / "_global" / "b_calib.npz"
+        if p.exists():
+            z = np.load(p)
+            return {s: np.roll(Rotation.from_matrix(z[f"mount_R_{s}"]).as_quat(), 1)
+                    for s in ("left", "right")}
+    print("WARNING: b_calib.npz not found — falling back to an IDENTITY hand mount, which is "
+          "visually wrong. Run the extraction's b_calib stage, or pass --data-extraction-path.")
+    return None
+
+
 class G1Renderer:
     """One G1 backend (arms) with offscreen rendering; optionally revo2 hands
     attached for finger rendering."""
 
-    def __init__(self, width=480, height=480, cam=None, with_hands=False, hand_mount=None):
+    def __init__(self, width=480, height=480, cam=None, with_hands=False, hand_mount=None,
+                 data_extraction_root=None):
         self._g1, self._frames, self._hc = _import_sim()
         self.with_hands = with_hands
         if with_hands:
-            model = _build_combined_model(self._g1, self._hc, hand_mount)
+            mount_quats = load_mount_quats(data_extraction_root)
+            model = _build_combined_model(self._g1, self._hc, hand_mount, mount_quats)
             self.backend = self._g1.G1Backend(model=model)
             self._hand = _HandDrive(self.backend.model, self.backend.data, self._hc)
         else:
@@ -72,18 +103,20 @@ class EvalIK:
 
 # --- combined G1 + revo2 hands (mjSpec attach) --------------------------------
 
-def _build_combined_model(g1, hand_constants, hand_mount):
+def _build_combined_model(g1, hand_constants, hand_mount, mount_quats):
     """G1 with the built-in `rubber_hand` mesh REMOVED and the revo2 hands
     attached at the flange sites, compiled to one MjModel. hand_mount =
     optional dict(xyz=..., rpy=...) applied to both hands' base relative to the
     flange (default identity — the flange site sits at the wrist_yaw_link origin
     and the revo2 base is already flange-aligned there)."""
-    return _build_combined_spec(g1, hand_constants, hand_mount).compile()
+    return _build_combined_spec(g1, hand_constants, hand_mount, mount_quats).compile()
 
 
-def _build_combined_spec(g1, hand_constants, hand_mount):
-    """The uncompiled spec (rubber_hand removed, revo2 hands attached) — so two
-    of them can be merged into one two-robot scene for the interactive viewer."""
+def _build_combined_spec(g1, hand_constants, hand_mount, mount_quats):
+    """The uncompiled spec (rubber_hand removed, revo2 hands attached at the
+    calibrated flange->Revo2 rotation) — two of these merge into the two-robot
+    interactive scene. `hand_mount` (xyz/rpy) is an OPTIONAL extra correction
+    applied on top of the calibrated mount."""
     import mujoco
 
     spec = mujoco.MjSpec.from_file(g1.MODEL_XML)
@@ -93,14 +126,15 @@ def _build_combined_spec(g1, hand_constants, hand_mount):
 
     xyz = np.zeros(3) if hand_mount is None else np.asarray(hand_mount.get("xyz", np.zeros(3)), float)
     rpy = np.zeros(3) if hand_mount is None else np.asarray(hand_mount.get("rpy", np.zeros(3)), float)
-    quat = _rpy_to_wxyz(rpy)
+    extra = _rpy_to_wxyz(rpy)
     for side in ("left", "right"):
         hand_spec = mujoco.MjSpec.from_file(str(hand_constants.MJCF_PATH[side]))
         root = hand_spec.worldbody.bodies[0]  # {side}_base_link
         site = spec.site(g1.EE_SITES[side])
+        mount = np.array([1.0, 0, 0, 0]) if mount_quats is None else np.asarray(mount_quats[side], float)
         frame = site.parent.add_frame()
         frame.pos = np.asarray(site.pos, float) + xyz
-        frame.quat = _quat_mul(np.asarray(site.quat, float), quat)
+        frame.quat = _quat_mul(_quat_mul(np.asarray(site.quat, float), mount), extra)
         frame.attach_body(root, f"{side}_hand_", "")
     return spec
 
@@ -124,12 +158,13 @@ class TwoRobotScene:
     """GT + eval G1 (with hands) in ONE model, offset in y, for the interactive
     orbitable viewer. Display-only — IK reconstruction happens elsewhere."""
 
-    def __init__(self, hand_mount=None, sep=0.9):
+    def __init__(self, hand_mount=None, sep=0.9, data_extraction_root=None):
         import mujoco
 
         self._g1, self._frames, self._hc = _import_sim()
-        base = _build_combined_spec(self._g1, self._hc, hand_mount)
-        second = _build_combined_spec(self._g1, self._hc, hand_mount)
+        mq = load_mount_quats(data_extraction_root)
+        base = _build_combined_spec(self._g1, self._hc, hand_mount, mq)
+        second = _build_combined_spec(self._g1, self._hc, hand_mount, mq)
         frame = base.worldbody.add_frame()
         frame.pos = [0.0, -sep, 0.0]
         frame.attach_body(second.body("pelvis"), "eval_", "")
@@ -137,6 +172,10 @@ class TwoRobotScene:
         self.data = mujoco.MjData(self.model)
         self.gt = _RobotHandle(self.model, self.data, self._hc, self._g1, prefix="")
         self.eval = _RobotHandle(self.model, self.data, self._hc, self._g1, prefix="eval_")
+        # tint the EVAL robot blue so it is unmistakable (GT keeps the stock look)
+        for g in range(self.model.ngeom):
+            if self.model.body(self.model.geom_bodyid[g]).name.startswith("eval_"):
+                self.model.geom_rgba[g] = [0.45, 0.62, 0.95, 1.0]
 
     def set_frame(self, gt_arm, gt_hl, gt_hr, ev_arm, ev_hl, ev_hr):
         import mujoco
