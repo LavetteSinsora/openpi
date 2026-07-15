@@ -116,7 +116,7 @@ def main(args: Args) -> None:
         if args.dataset is None:
             raise ValueError("--start-from-episode needs --dataset")
         from ego2g1.deploy import ramp as _ramp
-        from ego2g1.eval_replay import dataset_io as dio
+        from ego2g1.open_loop_eval import dataset_io as dio
 
         ep = dio.load_episode(pathlib.Path(args.dataset), args.start_from_episode)
         q_start = ep.arm_qpos[0].astype(float)

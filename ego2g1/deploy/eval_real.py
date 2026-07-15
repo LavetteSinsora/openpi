@@ -4,7 +4,7 @@
         --dataset ../../lerobot_datasets/ego2g1/put_bottle_in_box \
         --episode 0 --host 127.0.0.1 --port 8000
 
-The real-hardware twin of `ego2g1.eval_replay`, which runs this same loop in
+The real-hardware twin of `ego2g1.open_loop_eval.eval_in_sim`, which runs this same loop in
 MuJoCo. Same semantics: every K ticks, re-anchor the robot to the recording's
 ground-truth posture, feed the policy the RECORDED image at that tick, execute the
 first K of the 50 actions it predicts, repeat. In-distribution by construction;
@@ -23,7 +23,7 @@ Why this rung exists, and why it is the one to run BEFORE a live rollout:
   Correspondingly: this rung says NOTHING about whether the head camera is usable.
   It is the control, not the experiment.
 
-The reset is a RAMP, not a teleport. eval_replay snaps its MuJoCo robot to ground
+The reset is a RAMP, not a teleport. eval_in_sim snaps its MuJoCo robot to ground
 truth instantly; a real arm cannot, and by the time the policy has drifted for K
 ticks the snap-back can be a large motion. So it is rate-limited to the same
 0.5 rad/s the bring-up rungs use, and then SETTLES before the next query — the
@@ -85,7 +85,7 @@ class Args:
 
     # How many of the 50 predicted actions to execute before re-anchoring to ground
     # truth. Lower = more teacher forcing, less drift, more snaps. 25 matches
-    # eval_replay's default so the two are comparable.
+    # eval_in_sim's default so the two are comparable.
     k: int = 25
 
     start_tick: int = 0
@@ -115,7 +115,7 @@ def main(args: Args) -> None:
     from ego2g1.deploy import dds as _dds
     from ego2g1.deploy import kinematics as _kin
     from ego2g1.deploy.trajectory import TrajectoryBuffer
-    from ego2g1.eval_replay import dataset_io as dio
+    from ego2g1.open_loop_eval import dataset_io as dio
 
     ep = dio.load_episode(pathlib.Path(args.dataset), args.episode)
     print(f"\nepisode {ep.episode_index} ({ep.source_episode}): {ep.n_frames} frames "

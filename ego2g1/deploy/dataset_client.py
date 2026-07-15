@@ -31,8 +31,8 @@ import pathlib
 import numpy as np
 
 from ego2g1.common import layout
-from ego2g1.eval_replay import dataset_io as dio
-from ego2g1.eval_replay.rollout import gt_actions
+from ego2g1.open_loop_eval import dataset_io as dio
+from ego2g1.open_loop_eval.eval_in_sim.rollout import gt_actions
 
 logger = logging.getLogger(__name__)
 

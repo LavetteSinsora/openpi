@@ -2,7 +2,7 @@
 and render two G1s (ground truth + evaluated checkpoint) beside the egocentric video,
 scrubbable on one timeline.
 
-    python -m ego2g1.eval_replay.viewer --rollout eval_rollout.npz \
+    python -m ego2g1.open_loop_eval.eval_in_sim.viewer --rollout eval_rollout.npz \
         --dataset-root /path/to/put_bottle_in_box \
         --data-extraction-path /path/to/ego-pi-replication [--hands]
 
@@ -17,7 +17,7 @@ import sys
 
 import numpy as np
 
-from ego2g1.eval_replay import dataset_io as dio
+from ego2g1.open_loop_eval import dataset_io as dio
 
 A_EEF = {"left": slice(0, 9), "right": slice(15, 24)}
 A_HAND = {"left": slice(9, 15), "right": slice(24, 30)}
@@ -27,7 +27,7 @@ def reconstruct_eval(dump, ep, ik_renderer):
     """Per-frame eval arm_qpos(14) + hand cmds, teacher-forced: query ticks stay
     at the GT anchor (re-sync snap); inter-anchor frames are the predicted arc."""
     from ego2g1.chunk_math import vec9_to_se3
-    from ego2g1.eval_replay.scene import EvalIK
+    from ego2g1.open_loop_eval.eval_in_sim.scene import EvalIK
 
     T = ep.n_frames
     query_ticks = dump["query_ticks"].tolist()
@@ -158,7 +158,7 @@ def run_interactive(ep, eval_arm, eval_hl, eval_hr, query_ticks, mount, fps=30,
     import mujoco
     import mujoco.viewer
 
-    from ego2g1.eval_replay.scene import TwoRobotScene
+    from ego2g1.open_loop_eval.eval_in_sim.scene import TwoRobotScene
 
     scene = TwoRobotScene(hand_mount=mount, data_extraction_root=data_extraction_root)
     T = ep.n_frames
@@ -179,7 +179,7 @@ def run_interactive(ep, eval_arm, eval_hl, eval_hr, query_ticks, mount, fps=30,
         if "mjpython" in str(e):
             raise SystemExit(
                 "macOS needs mjpython for the interactive viewer. Re-run with:\n"
-                "  PYTHONPATH=. ../../.venv/bin/mjpython -m ego2g1.eval_replay.viewer <same args>\n"
+                "  PYTHONPATH=. ../../.venv/bin/mjpython -m ego2g1.open_loop_eval.eval_in_sim.viewer <same args>\n"
                 "(or drop --interactive to use the OpenCV window / --mp4)."
             ) from e
         raise
@@ -207,7 +207,7 @@ def main():
     ap.add_argument("--hands", action="store_true", help="attach revo2 hands (else arms + grip bars only)")
     ap.add_argument("--hand-mount-xyz", type=float, nargs=3, default=None)
     ap.add_argument("--hand-mount-rpy", type=float, nargs=3, default=None)
-    ap.add_argument("--out", default="eval_replay.mp4", help="mp4 written when headless / --mp4")
+    ap.add_argument("--out", default="eval_in_sim.mp4", help="mp4 written when headless / --mp4")
     ap.add_argument("--mp4", action="store_true", help="force mp4 output (no live window)")
     ap.add_argument("--interactive", action="store_true",
                     help="orbitable mujoco 3D viewer with both robots (drag to rotate); needs a display")
@@ -217,7 +217,7 @@ def main():
     sys.path.insert(0, str(pathlib.Path(args.data_extraction_path).resolve()))
     import cv2
 
-    from ego2g1.eval_replay.scene import G1Renderer
+    from ego2g1.open_loop_eval.eval_in_sim.scene import G1Renderer
 
     dump = np.load(args.rollout, allow_pickle=False)
     episode_index = int(dump["episode_index"])

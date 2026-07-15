@@ -1,4 +1,4 @@
-# eval_replay — teacher-forced checkpoint replay
+# eval_in_sim — teacher-forced checkpoint replay in MuJoCo
 
 Watch a checkpoint behave on a held-out episode: two G1s side by side —
 **ground truth** (recorded motion) and the **evaluated checkpoint** (policy
@@ -16,7 +16,7 @@ Two phases, because the PPU box is headless:
 ## Phase 1 — rollout (on the box, needs jax + checkpoint + dataset)
 
 ```bash
-python -m ego2g1.eval_replay.rollout \
+python -m ego2g1.open_loop_eval.eval_in_sim.rollout \
     --checkpoint checkpoints/ego2g1_pi05/run1/10000 \
     --source-episode put_bottle_in_box/episode_10 \
     --dataset-root /path/to/put_bottle_in_box \
@@ -33,7 +33,7 @@ states per query). No mujoco/mink/display. Needs a video decoder:
 ## Phase 2 — viewer (on a machine with a display: mujoco/mink + data_extraction)
 
 ```bash
-python -m ego2g1.eval_replay.viewer \
+python -m ego2g1.open_loop_eval.eval_in_sim.viewer \
     --rollout eval_rollout.npz \
     --dataset-root /path/to/put_bottle_in_box \
     --data-extraction-path /path/to/ego-pi-replication \
@@ -64,10 +64,10 @@ Flags:
 ## Transform sanity (no checkpoint needed)
 
 ```bash
-python -m ego2g1.eval_replay.rollout --synthetic-gt \
+python -m ego2g1.open_loop_eval.eval_in_sim.rollout --synthetic-gt \
     --source-episode put_bottle_in_box/episode_10 \
     --dataset-root /path/to/put_bottle_in_box --out gt.npz
-python -m ego2g1.eval_replay.viewer --rollout gt.npz --mp4 ...
+python -m ego2g1.open_loop_eval.eval_in_sim.viewer --rollout gt.npz --mp4 ...
 ```
 
 `--synthetic-gt` writes a dump whose composed targets exactly reproduce the

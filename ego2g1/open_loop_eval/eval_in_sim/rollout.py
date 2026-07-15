@@ -4,7 +4,7 @@ Runs the checkpoint through the EXACT deployment stack (ego2g1.serve.create_poli
 -> Policy.infer -> sample_actions Euler integration) on the real recorded observations,
 and dumps the raw action chunks + anchor states. No mujoco/mink/display.
 
-    uv run python -m ego2g1.eval_replay.rollout \
+    uv run python -m ego2g1.open_loop_eval.eval_in_sim.rollout \
         --checkpoint checkpoints/ego2g1_pi05/run1/10000 \
         --source-episode put_bottle_in_box/episode_10 \
         --dataset-root /path/to/put_bottle_in_box --out eval_rollout.npz
@@ -19,7 +19,7 @@ import pathlib
 
 import numpy as np
 
-from ego2g1.eval_replay import dataset_io as dio
+from ego2g1.open_loop_eval import dataset_io as dio
 
 # action layout mirrors the state layout: per hand [eef vec9 (9) | hand cmd (6)]
 A_EEF = {"left": slice(0, 9), "right": slice(15, 24)}

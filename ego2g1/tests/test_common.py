@@ -129,7 +129,7 @@ def test_reanchor_leaves_hand_dims_untouched():
 
 
 def test_slices_match_the_dataset_reader():
-    """eval_replay/dataset_io.py has the authoritative, verified slices."""
+    """open_loop_eval/dataset_io.py has the authoritative, verified slices."""
     assert (layout.EEF["left"], layout.HAND["left"]) == (slice(0, 9), slice(9, 15))
     assert (layout.EEF["right"], layout.HAND["right"]) == (slice(15, 24), slice(24, 30))
     assert layout.DIM == 30
