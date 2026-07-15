@@ -79,37 +79,11 @@ happens to be standing.
 
 ## `eval_real` — teacher-forced eval on the real robot
 
-```bash
-python -m ego2g1.deploy.eval_real \
-    --dataset ../../lerobot_datasets/ego2g1/put_bottle_in_box \
-    --episode 0 --host 127.0.0.1 --port 8000 --k 25
-```
-
-The hardware twin of `ego2g1.open_loop_eval.eval_in_sim` (which runs the same loop in MuJoCo).
-Every K ticks: snap the arm back to the recording's ground-truth posture, feed the
-policy the **recorded** frame for that tick, execute the first K of the 50 actions
-it predicts, repeat. It prints the drift — `max |q − q_gt|` after each segment — and
-writes `eval_real.npz`.
-
-**Run this before the first live rollout.** A bad live rollout has two explanations
-that nothing else separates: the policy is bad, or the G1's head camera does not
-show what the Pico headset showed in training. That viewpoint risk fails quietly —
-a shifted FOV just looks like a mediocre checkpoint. Feeding the policy the
-recording's own frames removes the camera from the equation entirely, so anything
-that goes wrong is the policy, the transforms, or the robot.
-
-The converse is worth saying out loud: **this rung tells you nothing about whether
-the head camera is usable.** It is the control, not the experiment.
-
-The snap-back is a *ramp*, not a teleport — eval_in_sim can move a MuJoCo robot
-instantly and a real arm cannot, and after K ticks of drift the snap can be a large
-motion. So it goes through the rate limiter and then **settles** (`--settle-s`)
-before the next query: the anchor is the measured FK, and reading it while the arm
-is still coasting anchors the chunk on a pose the robot is not in. The pause costs
-nothing — a teacher-forced timeline is already discontinuous at every snap.
-
-No RTC, no async, no delay budget here. Those exist to make chunk seams continuous;
-this rung breaks the timeline at every seam on purpose.
+Moved to [`ego2g1.open_loop_eval.eval_in_real`](../open_loop_eval/eval_in_real/README.md).
+It is the hardware twin of `eval_in_sim` and **the rung to run before the first live
+rollout** — it reuses this deploy hardware stack and the same `serve` + tunnel setup
+below, but feeds the policy the recording's own frames so the head camera is out of the
+loop.
 
 ## Client-side image resize (`--image-resize`)
 

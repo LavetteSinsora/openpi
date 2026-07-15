@@ -1,6 +1,6 @@
 """Teacher-forced policy eval on the REAL robot, with recorded observations.
 
-    python -m ego2g1.deploy.eval_real \
+    python -m ego2g1.open_loop_eval.eval_in_real.eval_real \
         --dataset ../../lerobot_datasets/ego2g1/put_bottle_in_box \
         --episode 0 --host 127.0.0.1 --port 8000
 
